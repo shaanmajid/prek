@@ -285,8 +285,9 @@ async fn parse_merge_msg_for_conflicts() -> Result<Vec<PathBuf>, Error> {
 pub(crate) async fn get_diff(path: &Path) -> Result<Vec<u8>, Error> {
     let output = git_cmd("git diff")?
         .arg("diff")
-        .arg("--no-ext-diff") // Disable external diff drivers
-        .arg("--no-textconv")
+        .arg("--name-only")
+        .arg("-z")
+        .arg("--no-ext-diff")
         .arg("--ignore-submodules")
         .arg("--")
         .arg(path)
@@ -634,3 +635,4 @@ pub(crate) fn list_submodules(git_root: &Path) -> Result<Vec<PathBuf>, Error> {
         .map(|submodule| git_root.join(submodule))
         .collect())
 }
+
