@@ -151,17 +151,31 @@ pub(crate) async fn try_repo(
     let store = Store::from_settings()?;
     let tmp_dir = TempDir::with_prefix_in("try-repo-", store.scratch_path())?;
 
-    let (repo_path, rev) = prepare_repo_and_rev(&repo, rev.as_deref(), tmp_dir.path())
-        .await
-        .context("Failed to determine repository and revision")?;
+    let result = prepare_repo_and_rev(&repo, rev.as_deref(), tmp_dir.path()).await;
+    let hint = result
+        .as_ref()
+        .err()
+        .and_then(|e| git::auth_hint_kind_from_error(e.as_ref()));
+    let (repo_path, rev) = result.with_context(|| {
+        format!(
+            "Failed to determine repository and revision{}",
+            git::auth_hint_suffix(hint)
+        )
+    })?;
 
     let store = Store::from_path(tmp_dir.path()).init()?;
-    let repo_clone_path = store
+    let clone_result = store
         .clone_repo(
             &config::RemoteRepo::new(repo_path.to_string(), rev.clone(), vec![]),
             None,
         )
-        .await?;
+        .await;
+    let hint = clone_result
+        .as_ref()
+        .err()
+        .and_then(|e| git::auth_hint_kind_from_error(e));
+    let repo_clone_path = clone_result
+        .with_context(|| format!("Failed to clone repository{}", git::auth_hint_suffix(hint)))?;
 
     let selectors = Selectors::load(&run_args.includes, &run_args.skips, GIT_ROOT.as_ref()?)?;
 

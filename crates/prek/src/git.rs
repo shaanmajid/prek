@@ -1,11 +1,13 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::error::Error as StdError;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::str::Utf8Error;
 use std::sync::LazyLock;
 
 use anyhow::Result;
+use owo_colors::OwoColorize;
 use path_clean::PathClean;
 use prek_consts::env_vars::EnvVars;
 use rustc_hash::FxHashSet;
@@ -28,6 +30,63 @@ pub(crate) enum Error {
 
     #[error(transparent)]
     UTF8(#[from] Utf8Error),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthHintKind {
+    Auth,
+    RepoNotFound,
+}
+
+/// FAQ URL for private repository authentication.
+pub(crate) const PRIVATE_REPO_FAQ_URL: &str =
+    "https://prek.j178.dev/faq#how-do-i-use-hooks-from-private-repositories";
+
+/// Hint message for authentication failures.
+pub(crate) const AUTH_HINT: &str = "For private repos, see:";
+
+/// Hint message for repository not found errors.
+pub(crate) const REPO_NOT_FOUND_HINT: &str =
+    "Repo not found. The URL or revision may be wrong, or the repo may be private. See:";
+
+/// Format an auth hint suffix for error messages.
+pub(crate) fn auth_hint_suffix(kind: Option<AuthHintKind>) -> String {
+    match kind {
+        Some(AuthHintKind::Auth) => {
+            format!(
+                "\n\n{} {} {}",
+                "hint:".yellow().bold(),
+                AUTH_HINT,
+                PRIVATE_REPO_FAQ_URL,
+            )
+        }
+        Some(AuthHintKind::RepoNotFound) => {
+            format!(
+                "\n\n{} {} {}",
+                "hint:".yellow().bold(),
+                REPO_NOT_FOUND_HINT,
+                PRIVATE_REPO_FAQ_URL,
+            )
+        }
+        None => String::new(),
+    }
+}
+
+impl Error {
+    pub(crate) fn auth_hint_kind(&self) -> Option<AuthHintKind> {
+        match self {
+            Self::Command(error) => error.auth_hint_kind(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_auth_error(&self) -> bool {
+        matches!(self.auth_hint_kind(), Some(AuthHintKind::Auth))
+    }
+
+    pub(crate) fn is_repo_not_found(&self) -> bool {
+        matches!(self.auth_hint_kind(), Some(AuthHintKind::RepoNotFound))
+    }
 }
 
 pub(crate) static GIT: LazyLock<Result<PathBuf, which::Error>> =
@@ -68,6 +127,60 @@ pub(crate) static GIT_ENV_TO_REMOVE: LazyLock<Vec<(String, String)>> = LazyLock:
         })
         .collect()
 });
+
+pub(crate) fn auth_hint_kind_from_output(output: &std::process::Output) -> Option<AuthHintKind> {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if is_auth_error_message(&stderr) {
+        Some(AuthHintKind::Auth)
+    } else if is_repo_not_found_message(&stderr) {
+        Some(AuthHintKind::RepoNotFound)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn auth_hint_kind_from_error(error: &(dyn StdError + 'static)) -> Option<AuthHintKind> {
+    let mut current = Some(error);
+    while let Some(err) = current {
+        if let Some(git_error) = err.downcast_ref::<Error>() {
+            if let Some(kind) = git_error.auth_hint_kind() {
+                return Some(kind);
+            }
+        }
+
+        if let Some(process_error) = err.downcast_ref::<crate::process::Error>() {
+            if let Some(kind) = process_error.auth_hint_kind() {
+                return Some(kind);
+            }
+        }
+
+        current = err.source();
+    }
+
+    None
+}
+
+pub(crate) fn is_auth_error_message(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    let patterns = [
+        "terminal prompts disabled",
+        "could not read username",
+        "could not read password",
+        "authentication failed",
+        "permission denied (publickey)",
+        "invalid username or token",
+        "returned error: 401",
+        "returned error: 403",
+    ];
+
+    patterns.iter().any(|pattern| stderr.contains(pattern))
+}
+
+pub(crate) fn is_repo_not_found_message(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    stderr.contains("returned error: 404")
+        || (stderr.contains("repository") && stderr.contains("not found"))
+}
 
 pub(crate) fn git_cmd(summary: &str) -> Result<Cmd, Error> {
     let mut cmd = Cmd::new(GIT.as_ref().map_err(|&e| Error::GitNotFound(e))?, summary);
@@ -650,4 +763,59 @@ pub(crate) fn list_submodules(git_root: &Path) -> Result<Vec<PathBuf>, Error> {
         .filter_map(|line| line.split_whitespace().nth(1))
         .map(|submodule| git_root.join(submodule))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_auth_error_message_matches_common_failures() {
+        let samples = [
+            "fatal: could not read Username for 'https://example.com': terminal prompts disabled",
+            "fatal: could not read Password for 'https://example.com': terminal prompts disabled",
+            "remote: Authentication failed for 'https://example.com/org/repo'",
+            "Permission denied (publickey).",
+            "remote: Invalid username or token.",
+            "The requested URL returned error: 401",
+            "The requested URL returned error: 403",
+        ];
+
+        for sample in samples {
+            assert!(
+                is_auth_error_message(sample),
+                "sample should match: {sample}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_repo_not_found_message_matches_common_failures() {
+        let samples = [
+            "fatal: repository 'https://example.com/org/repo' not found",
+            "The requested URL returned error: 404",
+            "Repository not found",
+        ];
+
+        for sample in samples {
+            assert!(
+                is_repo_not_found_message(sample),
+                "sample should match: {sample}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_auth_error_message_ignores_unrelated_errors() {
+        assert!(!is_auth_error_message(
+            "fatal: bad object deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        ));
+    }
+
+    #[test]
+    fn is_repo_not_found_message_ignores_unrelated_errors() {
+        assert!(!is_repo_not_found_message(
+            "fatal: could not read Username for 'https://example.com': terminal prompts disabled"
+        ));
+    }
 }

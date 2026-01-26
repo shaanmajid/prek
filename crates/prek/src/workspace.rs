@@ -13,7 +13,6 @@ use owo_colors::OwoColorize;
 use prek_consts::{ALT_CONFIG_FILE, CONFIG_FILE};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 use tracing::{debug, error, instrument, trace};
 
 use crate::cli::run::Selectors;
@@ -26,32 +25,80 @@ use crate::run::CONCURRENCY;
 use crate::store::{CacheBucket, Store};
 use crate::{git, store, warn_user};
 
-#[derive(Error, Debug)]
+#[derive(Debug)]
 pub(crate) enum Error {
-    #[error(transparent)]
-    Config(#[from] config::Error),
-
-    #[error(transparent)]
-    Hook(#[from] hook::Error),
-
-    #[error(transparent)]
-    Git(#[from] anyhow::Error),
-
-    #[error(
-        "No `.pre-commit-config.yaml` found in the current directory or parent directories.\n\n{} If you just added one, rerun your command with the `--refresh` flag to rescan the workspace.",
-        "hint:".yellow().bold(),
-    )]
+    Config(config::Error),
+    Hook(hook::Error),
+    Git(anyhow::Error),
     MissingPreCommitConfig,
-
-    #[error("Hook `{hook}` not present in repo `{repo}`")]
-    HookNotFound { hook: String, repo: String },
-
-    #[error("Failed to initialize repo `{repo}`")]
+    HookNotFound {
+        hook: String,
+        repo: String,
+    },
     Store {
         repo: String,
-        #[source]
         error: Box<store::Error>,
     },
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Config(e) => write!(f, "{e}"),
+            Self::Hook(e) => write!(f, "{e}"),
+            Self::Git(e) => write!(f, "{e}"),
+            Self::MissingPreCommitConfig => {
+                write!(
+                    f,
+                    "No `.pre-commit-config.yaml` found in the current directory or parent directories.\n\n{} If you just added one, rerun your command with the `--refresh` flag to rescan the workspace.",
+                    "hint:".yellow().bold()
+                )
+            }
+            Self::HookNotFound { hook, repo } => {
+                write!(f, "Hook `{hook}` not present in repo `{repo}`")
+            }
+            Self::Store { repo, error } => {
+                write!(
+                    f,
+                    "Failed to initialize repo `{repo}`{}",
+                    git::auth_hint_suffix(error.auth_hint_kind())
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            // Transparent errors: delegate to the inner error's source to avoid duplicates.
+            Self::Config(e) => e.source(),
+            Self::Hook(e) => e.source(),
+            Self::Git(e) => e.source(),
+            Self::MissingPreCommitConfig => None,
+            Self::HookNotFound { .. } => None,
+            // Non-transparent: source returns inner
+            Self::Store { error, .. } => Some(error.as_ref()),
+        }
+    }
+}
+
+impl From<config::Error> for Error {
+    fn from(e: config::Error) -> Self {
+        Self::Config(e)
+    }
+}
+
+impl From<hook::Error> for Error {
+    fn from(e: hook::Error) -> Self {
+        Self::Hook(e)
+    }
+}
+
+impl From<anyhow::Error> for Error {
+    fn from(e: anyhow::Error) -> Self {
+        Self::Git(e)
+    }
 }
 
 pub(crate) trait HookInitReporter {
