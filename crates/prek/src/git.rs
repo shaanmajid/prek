@@ -32,61 +32,65 @@ pub(crate) enum Error {
     UTF8(#[from] Utf8Error),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AuthHintKind {
-    Auth,
-    RepoNotFound,
-}
-
 /// FAQ URL for private repository authentication.
-pub(crate) const PRIVATE_REPO_FAQ_URL: &str =
+const PRIVATE_REPO_FAQ_URL: &str =
     "https://prek.j178.dev/faq#how-do-i-use-hooks-from-private-repositories";
 
-/// Hint message for authentication failures.
-pub(crate) const AUTH_HINT: &str = "For private repos, see:";
-
-/// Hint message for repository not found errors.
-pub(crate) const REPO_NOT_FOUND_HINT: &str =
-    "Repo not found. The URL or revision may be wrong, or the repo may be private. See:";
-
-/// Format an auth hint suffix for error messages.
-pub(crate) fn auth_hint_suffix(kind: Option<AuthHintKind>) -> String {
-    match kind {
-        Some(AuthHintKind::Auth) => {
-            format!(
-                "\n\n{} {} {}",
-                "hint:".yellow().bold(),
-                AUTH_HINT,
-                PRIVATE_REPO_FAQ_URL,
-            )
+/// Detect auth hint from any error by walking the error chain.
+/// Returns a formatted hint suffix if an auth-related error is found.
+pub(crate) fn auth_hint_from_error(error: &(dyn StdError + 'static)) -> String {
+    let mut current: Option<&(dyn StdError + 'static)> = Some(error);
+    while let Some(err) = current {
+        if let Some(process_error) = err.downcast_ref::<crate::process::Error>() {
+            if let crate::process::Error::Status { error, .. } = process_error {
+                if let Some(output) = &error.output {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if let Some(hint) = auth_hint_for_stderr(&stderr) {
+                        return hint;
+                    }
+                }
+            }
         }
-        Some(AuthHintKind::RepoNotFound) => {
-            format!(
-                "\n\n{} {} {}",
-                "hint:".yellow().bold(),
-                REPO_NOT_FOUND_HINT,
-                PRIVATE_REPO_FAQ_URL,
-            )
-        }
-        None => String::new(),
+        current = err.source();
     }
+    String::new()
 }
 
-impl Error {
-    pub(crate) fn auth_hint_kind(&self) -> Option<AuthHintKind> {
-        match self {
-            Self::Command(error) => error.auth_hint_kind(),
-            _ => None,
-        }
+/// Check stderr for auth-related patterns and return a formatted hint if found.
+fn auth_hint_for_stderr(stderr: &str) -> Option<String> {
+    let stderr_lower = stderr.to_ascii_lowercase();
+
+    // Check for authentication failures
+    let auth_patterns = [
+        "terminal prompts disabled",
+        "could not read username",
+        "could not read password",
+        "authentication failed",
+        "permission denied (publickey)",
+        "invalid username or token",
+        "returned error: 401",
+        "returned error: 403",
+    ];
+    if auth_patterns.iter().any(|p| stderr_lower.contains(p)) {
+        return Some(format!(
+            "\n\n{} For private repos, see: {}",
+            "hint:".yellow().bold(),
+            PRIVATE_REPO_FAQ_URL,
+        ));
     }
 
-    pub(crate) fn is_auth_error(&self) -> bool {
-        matches!(self.auth_hint_kind(), Some(AuthHintKind::Auth))
+    // Check for repo not found
+    if stderr_lower.contains("returned error: 404")
+        || (stderr_lower.contains("repository") && stderr_lower.contains("not found"))
+    {
+        return Some(format!(
+            "\n\n{} Repo not found. The URL or revision may be wrong, or the repo may be private. See: {}",
+            "hint:".yellow().bold(),
+            PRIVATE_REPO_FAQ_URL,
+        ));
     }
 
-    pub(crate) fn is_repo_not_found(&self) -> bool {
-        matches!(self.auth_hint_kind(), Some(AuthHintKind::RepoNotFound))
-    }
+    None
 }
 
 pub(crate) static GIT: LazyLock<Result<PathBuf, which::Error>> =
@@ -127,60 +131,6 @@ pub(crate) static GIT_ENV_TO_REMOVE: LazyLock<Vec<(String, String)>> = LazyLock:
         })
         .collect()
 });
-
-pub(crate) fn auth_hint_kind_from_output(output: &std::process::Output) -> Option<AuthHintKind> {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if is_auth_error_message(&stderr) {
-        Some(AuthHintKind::Auth)
-    } else if is_repo_not_found_message(&stderr) {
-        Some(AuthHintKind::RepoNotFound)
-    } else {
-        None
-    }
-}
-
-pub(crate) fn auth_hint_kind_from_error(error: &(dyn StdError + 'static)) -> Option<AuthHintKind> {
-    let mut current = Some(error);
-    while let Some(err) = current {
-        if let Some(git_error) = err.downcast_ref::<Error>() {
-            if let Some(kind) = git_error.auth_hint_kind() {
-                return Some(kind);
-            }
-        }
-
-        if let Some(process_error) = err.downcast_ref::<crate::process::Error>() {
-            if let Some(kind) = process_error.auth_hint_kind() {
-                return Some(kind);
-            }
-        }
-
-        current = err.source();
-    }
-
-    None
-}
-
-pub(crate) fn is_auth_error_message(stderr: &str) -> bool {
-    let stderr = stderr.to_ascii_lowercase();
-    let patterns = [
-        "terminal prompts disabled",
-        "could not read username",
-        "could not read password",
-        "authentication failed",
-        "permission denied (publickey)",
-        "invalid username or token",
-        "returned error: 401",
-        "returned error: 403",
-    ];
-
-    patterns.iter().any(|pattern| stderr.contains(pattern))
-}
-
-pub(crate) fn is_repo_not_found_message(stderr: &str) -> bool {
-    let stderr = stderr.to_ascii_lowercase();
-    stderr.contains("returned error: 404")
-        || (stderr.contains("repository") && stderr.contains("not found"))
-}
 
 pub(crate) fn git_cmd(summary: &str) -> Result<Cmd, Error> {
     let mut cmd = Cmd::new(GIT.as_ref().map_err(|&e| Error::GitNotFound(e))?, summary);
@@ -770,7 +720,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn is_auth_error_message_matches_common_failures() {
+    fn auth_hint_detects_auth_failures() {
         let samples = [
             "fatal: could not read Username for 'https://example.com': terminal prompts disabled",
             "fatal: could not read Password for 'https://example.com': terminal prompts disabled",
@@ -783,14 +733,20 @@ mod tests {
 
         for sample in samples {
             assert!(
-                is_auth_error_message(sample),
-                "sample should match: {sample}"
+                auth_hint_for_stderr(sample).is_some(),
+                "should detect auth error: {sample}"
+            );
+            assert!(
+                auth_hint_for_stderr(sample)
+                    .unwrap()
+                    .contains("For private repos"),
+                "should show auth hint: {sample}"
             );
         }
     }
 
     #[test]
-    fn is_repo_not_found_message_matches_common_failures() {
+    fn auth_hint_detects_repo_not_found() {
         let samples = [
             "fatal: repository 'https://example.com/org/repo' not found",
             "The requested URL returned error: 404",
@@ -799,23 +755,20 @@ mod tests {
 
         for sample in samples {
             assert!(
-                is_repo_not_found_message(sample),
-                "sample should match: {sample}"
+                auth_hint_for_stderr(sample).is_some(),
+                "should detect repo not found: {sample}"
+            );
+            assert!(
+                auth_hint_for_stderr(sample)
+                    .unwrap()
+                    .contains("Repo not found"),
+                "should show repo not found hint: {sample}"
             );
         }
     }
 
     #[test]
-    fn is_auth_error_message_ignores_unrelated_errors() {
-        assert!(!is_auth_error_message(
-            "fatal: bad object deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-        ));
-    }
-
-    #[test]
-    fn is_repo_not_found_message_ignores_unrelated_errors() {
-        assert!(!is_repo_not_found_message(
-            "fatal: could not read Username for 'https://example.com': terminal prompts disabled"
-        ));
+    fn auth_hint_ignores_unrelated_errors() {
+        assert!(auth_hint_for_stderr("fatal: bad object deadbeef").is_none());
     }
 }

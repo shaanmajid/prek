@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use itertools::Itertools;
 use owo_colors::OwoColorize;
 use tempfile::TempDir;
@@ -151,31 +151,24 @@ pub(crate) async fn try_repo(
     let store = Store::from_settings()?;
     let tmp_dir = TempDir::with_prefix_in("try-repo-", store.scratch_path())?;
 
-    let result = prepare_repo_and_rev(&repo, rev.as_deref(), tmp_dir.path()).await;
-    let hint = result
-        .as_ref()
-        .err()
-        .and_then(|e| git::auth_hint_kind_from_error(e.as_ref()));
-    let (repo_path, rev) = result.with_context(|| {
-        format!(
-            "Failed to determine repository and revision{}",
-            git::auth_hint_suffix(hint)
-        )
-    })?;
+    let (repo_path, rev) = prepare_repo_and_rev(&repo, rev.as_deref(), tmp_dir.path())
+        .await
+        .map_err(|e| {
+            let hint = git::auth_hint_from_error(e.as_ref());
+            e.context(format!("Failed to determine repository and revision{hint}"))
+        })?;
 
     let store = Store::from_path(tmp_dir.path()).init()?;
-    let clone_result = store
+    let repo_clone_path = store
         .clone_repo(
             &config::RemoteRepo::new(repo_path.to_string(), rev.clone(), vec![]),
             None,
         )
-        .await;
-    let hint = clone_result
-        .as_ref()
-        .err()
-        .and_then(|e| git::auth_hint_kind_from_error(e));
-    let repo_clone_path = clone_result
-        .with_context(|| format!("Failed to clone repository{}", git::auth_hint_suffix(hint)))?;
+        .await
+        .map_err(|e| {
+            let hint = git::auth_hint_from_error(&e);
+            anyhow::anyhow!(e).context(format!("Failed to clone repository{hint}"))
+        })?;
 
     let selectors = Selectors::load(&run_args.includes, &run_args.skips, GIT_ROOT.as_ref()?)?;
 

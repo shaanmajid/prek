@@ -58,17 +58,6 @@ pub enum Error {
     PtySetup(#[from] std::io::Error),
 }
 
-impl Error {
-    pub(crate) fn auth_hint_kind(&self) -> Option<crate::git::AuthHintKind> {
-        match self {
-            Self::Status { error, .. } => error
-                .output
-                .as_ref()
-                .and_then(crate::git::auth_hint_kind_from_output),
-            _ => None,
-        }
-    }
-}
 
 /// The command ran but signaled some kind of error condition
 /// (assuming the exit code is used for that)

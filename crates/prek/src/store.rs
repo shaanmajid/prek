@@ -31,15 +31,6 @@ pub enum Error {
     Serde(#[from] serde_json::Error),
 }
 
-impl Error {
-    /// Get the auth hint kind for this error, if applicable.
-    pub fn auth_hint_kind(&self) -> Option<crate::git::AuthHintKind> {
-        match self {
-            Self::Git(error) => error.auth_hint_kind(),
-            _ => None,
-        }
-    }
-}
 
 /// Expand a path starting with `~` to the user's home directory.
 fn expand_tilde(path: PathBuf) -> PathBuf {

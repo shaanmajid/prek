@@ -61,7 +61,7 @@ impl std::fmt::Display for Error {
                 write!(
                     f,
                     "Failed to initialize repo `{repo}`{}",
-                    git::auth_hint_suffix(error.auth_hint_kind())
+                    git::auth_hint_from_error(error.as_ref())
                 )
             }
         }
