@@ -75,6 +75,27 @@ impl RustResult {
     }
 }
 
+/// Find the first toolchain matching the request, preferring newer versions.
+fn find_matching_toolchain(
+    toolchains: Vec<ToolchainInfo>,
+    request: &RustRequest,
+    source: &str,
+) -> Option<RustResult> {
+    toolchains
+        .into_iter()
+        .sorted_unstable_by(|a, b| b.version.cmp(&a.version))
+        .find_map(|info| {
+            let matches = request.matches(&info.version, Some(&info.path));
+            if matches {
+                trace!(name = %info.name, source, "Found matching rust");
+                Some(RustResult::from_dir(&info.path).with_version(info.version))
+            } else {
+                trace!(name = %info.name, source, "Rust does not match request");
+                None
+            }
+        })
+}
+
 pub(crate) struct RustInstaller {
     rustup: Rustup,
 }
@@ -115,51 +136,18 @@ impl RustInstaller {
     }
 
     async fn find_installed(&self, request: &RustRequest) -> Result<RustResult> {
-        let toolchains: Vec<ToolchainInfo> = self.rustup.list_installed_toolchains().await?;
-
-        let installed = toolchains
-            .into_iter()
-            .sorted_unstable_by(|a, b| b.version.cmp(&a.version));
-
-        installed
-            .into_iter()
-            .find_map(|info| {
-                let matches = request.matches(&info.version, Some(&info.path));
-
-                if matches {
-                    trace!(name = %info.name, "Found matching installed rust");
-                    Some(RustResult::from_dir(&info.path).with_version(info.version))
-                } else {
-                    trace!(name = %info.name, "Installed rust does not match request");
-                    None
-                }
-            })
+        let toolchains = self.rustup.list_installed_toolchains().await?;
+        find_matching_toolchain(toolchains, request, "installed")
             .context("No installed rust version matches the request")
     }
 
-    async fn find_system_rust(&self, rust_request: &RustRequest) -> Result<Option<RustResult>> {
-        let toolchains: Vec<ToolchainInfo> = self.rustup.list_system_toolchains().await?;
-
-        let installed = toolchains
-            .into_iter()
-            .sorted_unstable_by(|a, b| b.version.cmp(&a.version));
-
-        for info in installed {
-            let matches = rust_request.matches(&info.version, Some(&info.path));
-
-            if matches {
-                trace!(name = %info.name, "Found matching system rust");
-                let rust = RustResult::from_dir(&info.path).with_version(info.version);
-                return Ok(Some(rust));
-            }
-            trace!(name = %info.name, "System rust does not match request");
+    async fn find_system_rust(&self, request: &RustRequest) -> Result<Option<RustResult>> {
+        let toolchains = self.rustup.list_system_toolchains().await?;
+        let result = find_matching_toolchain(toolchains, request, "system");
+        if result.is_none() {
+            debug!(?request, "No system rust matches the requested version");
         }
-
-        debug!(
-            ?rust_request,
-            "No system rust matches the requested version"
-        );
-        Ok(None)
+        Ok(result)
     }
 
     async fn resolve_version(&self, req: &RustRequest) -> Result<RustVersion> {

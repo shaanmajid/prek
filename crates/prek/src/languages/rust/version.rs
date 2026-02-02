@@ -361,11 +361,11 @@ mod tests {
         let mut install_info =
             InstallInfo::new(Language::Rust, FxHashSet::default(), temp_dir.path())?;
         install_info
-            .with_language_version(semver::Version::new(1, 75, 0))
+            .with_language_version(semver::Version::new(0, 0, 0))
             .with_toolchain(PathBuf::from("/some/path"))
-            .with_extra("rust_channel", "stable");
+            .with_extra(EXTRA_KEY_CHANNEL, "stable");
 
-        // Any request should match stable channel
+        // Any request should match stable channel (even with version 0.0.0)
         assert!(RustRequest::Any.satisfied_by(&install_info));
 
         Ok(())
