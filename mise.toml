@@ -34,8 +34,16 @@ description = "Run all integration tests with insta review"
 run = "cargo insta test --review --test '*'"
 
 [tasks.test]
-description = "Run all tests"
-run = "cargo test --all-targets --all-features --workspace"
+description = "Run core tests (no external language toolchains required)"
+run = "cargo nextest run --profile ci-core --features schemars"
+
+[tasks.test-lang]
+description = "Run tests for a specific language (e.g., mise run test-lang lua)"
+run = "cargo nextest run --profile lang-{{arg(name='lang')}} --features schemars"
+
+[tasks.test-all]
+description = "Run ALL tests (requires lua, ruby, julia, haskell, etc.)"
+run = "cargo nextest run --features schemars"
 
 [tasks.generate-cli-reference]
 description = "Generate CLI reference"
