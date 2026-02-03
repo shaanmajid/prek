@@ -257,6 +257,19 @@ impl HookBuilder {
 
     /// Check the hook configuration.
     fn check(&self) -> Result<(), Error> {
+        // Check for contradictory quiet + verbose configuration.
+        if self.hook_spec.options.quiet == Some(true)
+            && self.hook_spec.options.verbose == Some(true)
+        {
+            return Err(Error::Hook {
+                hook: self.hook_spec.id.clone(),
+                error: anyhow::anyhow!(
+                    "Hook '{}' has both `quiet` and `verbose` set, which is contradictory",
+                    self.hook_spec.id
+                ),
+            });
+        }
+
         let language = self.hook_spec.language;
         let HookOptions {
             language_version,
@@ -329,6 +342,7 @@ impl HookBuilder {
         let pass_filenames = options.pass_filenames.unwrap_or(true);
         let require_serial = options.require_serial.unwrap_or(false);
         let verbose = options.verbose.unwrap_or(false);
+        let quiet = options.quiet.unwrap_or(false);
         let additional_dependencies = options
             .additional_dependencies
             .unwrap_or_default()
@@ -385,6 +399,7 @@ impl HookBuilder {
             pass_filenames,
             require_serial,
             verbose,
+            quiet,
             files: options.files,
             exclude: options.exclude,
             description: options.description,
@@ -507,6 +522,7 @@ pub(crate) struct Hook {
     pub require_serial: bool,
     pub stages: Stages,
     pub verbose: bool,
+    pub quiet: bool,
     pub minimum_prek_version: Option<String>,
     pub priority: u32,
 }
@@ -1031,6 +1047,7 @@ mod tests {
                 },
             ),
             verbose: true,
+            quiet: false,
             minimum_prek_version: None,
             priority: 42,
         }

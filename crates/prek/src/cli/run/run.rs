@@ -46,6 +46,7 @@ pub(crate) async fn run(
     show_diff_on_failure: bool,
     fail_fast: bool,
     dry_run: bool,
+    try_repo: bool,
     refresh: bool,
     extra_args: RunExtraArgs,
     verbose: bool,
@@ -206,6 +207,7 @@ pub(crate) async fn run(
         show_diff_on_failure,
         fail_fast,
         dry_run,
+        try_repo,
         verbose,
         printer,
     )
@@ -500,6 +502,7 @@ impl StatusPrinter {
     fn for_hooks(hooks: &[InstalledHook], printer: Printer) -> Self {
         let name_len = hooks
             .iter()
+            .filter(|hook| !hook.quiet)
             .map(|hook| hook.name.width())
             .max()
             .unwrap_or(0);
@@ -577,6 +580,7 @@ async fn run_hooks(
     show_diff_on_failure: bool,
     fail_fast: bool,
     dry_run: bool,
+    try_repo: bool,
     verbose: bool,
     printer: Printer,
 ) -> Result<ExitStatus> {
@@ -663,6 +667,8 @@ async fn run_hooks(
                     printer,
                     &status_printer,
                     &group_results,
+                    try_repo,
+                    dry_run,
                     verbose,
                     group_modified_files,
                 )
@@ -791,10 +797,13 @@ async fn run_priority_group(
     Ok(group_results)
 }
 
+#[expect(clippy::fn_params_excessive_bools)]
 fn render_priority_group(
     printer: Printer,
     status_printer: &StatusPrinter,
     group_results: &[RunResult],
+    try_repo: bool,
+    dry_run: bool,
     verbose: bool,
     group_modified_files: bool,
 ) -> Result<()> {
@@ -836,9 +845,21 @@ fn render_priority_group(
             result.status
         };
 
-        status_printer.write(&result.hook.name, prefix, status)?;
+        // Determine if this hook should be shown.
+        // Quiet hooks are hidden unless they fail or an override is active.
+        let show_hook =
+            !result.hook.quiet || status == RunStatus::Failed || verbose || dry_run || try_repo;
+
+        if show_hook {
+            status_printer.write(&result.hook.name, prefix, status)?;
+        }
 
         if matches!(status, RunStatus::NoFiles | RunStatus::Unimplemented) {
+            continue;
+        }
+
+        // Skip details for hidden quiet hooks
+        if !show_hook {
             continue;
         }
 

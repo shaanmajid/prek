@@ -275,6 +275,7 @@ async fn run(cli: Cli) -> Result<ExitStatus> {
                 args.show_diff_on_failure,
                 args.fail_fast,
                 args.dry_run,
+                false,
                 cli.globals.refresh,
                 args.extra,
                 cli.globals.verbose > 0,

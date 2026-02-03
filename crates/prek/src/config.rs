@@ -321,6 +321,9 @@ pub(crate) struct HookOptions {
     /// Print the output of the hook even if it passes.
     /// Default is false.
     pub verbose: Option<bool>,
+    /// Hide this hook's output unless it fails.
+    /// Default is false.
+    pub quiet: Option<bool>,
     /// The minimum version of prek required to run this hook.
     #[serde(deserialize_with = "deserialize_and_validate_minimum_version", default)]
     pub minimum_prek_version: Option<String>,
@@ -359,6 +362,7 @@ impl HookOptions {
             require_serial,
             stages,
             verbose,
+            quiet,
             minimum_prek_version,
         );
 
