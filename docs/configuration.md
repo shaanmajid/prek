@@ -741,6 +741,30 @@ Print hook output even when the hook succeeds.
 - Type: boolean
 - Default: `false`
 
+!!! note
+
+    Setting both `verbose: true` and `quiet: true` on the same hook is an error.
+
+#### `quiet`
+
+Hide this hook's output unless it fails.
+
+- Type: boolean
+- Default: `false`
+
+Use this for hooks that are typically noise when passing (e.g., trailing whitespace, merge conflict checks). The hook still runs normally; only its output is suppressed on success or skip.
+
+Quiet is overridden (hook shown) when:
+
+- The hook fails
+- `--verbose` is passed
+- `--dry-run` is passed
+- Running via `prek try-repo`
+
+!!! note
+
+    Setting both `quiet: true` and `verbose: true` on the same hook is an error.
+
 #### `log_file`
 
 Write hook output to a file when the hook fails (and also when `verbose: true`).
