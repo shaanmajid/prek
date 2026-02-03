@@ -37,6 +37,7 @@ Config {
                             require_serial: None,
                             stages: None,
                             verbose: None,
+                            quiet: None,
                             minimum_prek_version: None,
                             _unused_keys: {},
                         },

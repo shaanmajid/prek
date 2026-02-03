@@ -2986,6 +2986,40 @@ fn expands_tilde_in_prek_home() -> Result<()> {
 }
 
 #[test]
+fn quiet_and_verbose_conflict() -> Result<()> {
+    let context = TestContext::new();
+    context.init_project();
+
+    context.write_pre_commit_config(indoc::indoc! {r"
+        repos:
+          - repo: local
+            hooks:
+              - id: conflicting-hook
+                name: conflicting-hook
+                entry: echo hello
+                language: system
+                quiet: true
+                verbose: true
+    "});
+
+    context.work_dir().child("file.txt").write_str("hello")?;
+    context.git_add(".");
+
+    cmd_snapshot!(context.filters(), context.run(), @r"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
+    error: Failed to init hooks
+      caused by: Invalid hook `conflicting-hook`
+      caused by: Hook 'conflicting-hook' has both `quiet` and `verbose` set, which is contradictory
+    ");
+
+    Ok(())
+}
+
+#[test]
 fn run_with_tree_object_as_ref() -> Result<()> {
     let context = TestContext::new();
     context.init_project();
@@ -3028,6 +3062,225 @@ fn run_with_tree_object_as_ref() -> Result<()> {
     exit_code: 0
     ----- stdout -----
     echo files...............................................................Passed
+
+    ----- stderr -----
+    ");
+
+    Ok(())
+}
+
+#[test]
+fn quiet_hook_hidden_when_passing() -> Result<()> {
+    let context = TestContext::new();
+    context.init_project();
+
+    context.write_pre_commit_config(indoc::indoc! {r"
+        repos:
+          - repo: local
+            hooks:
+              - id: quiet-hook
+                name: quiet-hook
+                entry: echo quiet
+                language: system
+                quiet: true
+              - id: normal-hook
+                name: normal-hook
+                entry: echo normal
+                language: system
+    "});
+
+    context.work_dir().child("file.txt").write_str("hello")?;
+    context.git_add(".");
+
+    cmd_snapshot!(context.filters(), context.run(), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    normal-hook..............................................................Passed
+
+    ----- stderr -----
+    ");
+
+    Ok(())
+}
+
+#[test]
+fn quiet_hook_shown_when_failing() -> Result<()> {
+    let context = TestContext::new();
+    context.init_project();
+
+    context.write_pre_commit_config(indoc::indoc! {r"
+        repos:
+          - repo: local
+            hooks:
+              - id: quiet-failing-hook
+                name: quiet-failing-hook
+                entry: sh -c 'echo failing! && exit 1'
+                language: system
+                quiet: true
+    "});
+
+    context.work_dir().child("file.txt").write_str("hello")?;
+    context.git_add(".");
+
+    // The quiet hook should be shown because it failed
+    // Snapshot will capture the exact output format
+    cmd_snapshot!(context.filters(), context.run(), @r"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    quiet-failing-hook.......................................................Failed
+    - hook id: quiet-failing-hook
+    - exit code: 1
+
+      failing!
+
+    ----- stderr -----
+    ");
+
+    Ok(())
+}
+
+#[test]
+fn quiet_hook_shown_with_verbose_flag() -> Result<()> {
+    let context = TestContext::new();
+    context.init_project();
+
+    context.write_pre_commit_config(indoc::indoc! {r"
+        repos:
+          - repo: local
+            hooks:
+              - id: quiet-hook
+                name: quiet-hook
+                entry: echo quiet
+                language: system
+                quiet: true
+    "});
+
+    context.work_dir().child("file.txt").write_str("hello")?;
+    context.git_add(".");
+
+    // The quiet hook should be shown with --verbose
+    cmd_snapshot!(context.filters(), context.run().arg("--verbose"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    quiet-hook...............................................................Passed
+    - hook id: quiet-hook
+    - duration: [TIME]
+
+      quiet file.txt .pre-commit-config.yaml
+
+    ----- stderr -----
+    ");
+
+    Ok(())
+}
+
+#[test]
+fn quiet_hook_shown_with_dry_run() -> Result<()> {
+    let context = TestContext::new();
+    context.init_project();
+
+    context.write_pre_commit_config(indoc::indoc! {r"
+        repos:
+          - repo: local
+            hooks:
+              - id: quiet-hook
+                name: quiet-hook
+                entry: echo quiet
+                language: system
+                quiet: true
+    "});
+
+    context.work_dir().child("file.txt").write_str("hello")?;
+    context.git_add(".");
+
+    // The quiet hook should be shown with --dry-run
+    cmd_snapshot!(context.filters(), context.run().arg("--dry-run"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    quiet-hook..............................................................Dry Run
+
+    ----- stderr -----
+    ");
+
+    Ok(())
+}
+
+#[test]
+fn quiet_hook_hidden_when_skipped() -> Result<()> {
+    let context = TestContext::new();
+    context.init_project();
+
+    context.write_pre_commit_config(indoc::indoc! {r"
+        repos:
+          - repo: local
+            hooks:
+              - id: quiet-hook
+                name: quiet-hook
+                entry: echo quiet
+                language: system
+                files: \.py$
+                quiet: true
+              - id: normal-hook
+                name: normal-hook
+                entry: echo normal
+                language: system
+    "});
+
+    // Only create a .txt file, so the quiet hook will be skipped (no .py files)
+    context.work_dir().child("file.txt").write_str("hello")?;
+    context.git_add(".");
+
+    // Only normal-hook should be shown
+    cmd_snapshot!(context.filters(), context.run(), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    normal-hook..............................................................Passed
+
+    ----- stderr -----
+    ");
+
+    Ok(())
+}
+
+#[test]
+fn quiet_hooks_excluded_from_column_width() -> Result<()> {
+    let context = TestContext::new();
+    context.init_project();
+
+    // The quiet hook has a very long name that would affect alignment
+    // The normal hook has a short name
+    // If quiet hooks are excluded from width calc, the dots should be tight
+    context.write_pre_commit_config(indoc::indoc! {r"
+        repos:
+          - repo: local
+            hooks:
+              - id: this-is-a-very-long-hook-name-that-would-affect-alignment
+                name: this-is-a-very-long-hook-name-that-would-affect-alignment
+                entry: echo quiet
+                language: system
+                quiet: true
+              - id: short
+                name: short
+                entry: echo normal
+                language: system
+    "});
+
+    context.work_dir().child("file.txt").write_str("hello")?;
+    context.git_add(".");
+
+    // The "short" hook should have tight alignment, not padded for the long quiet hook
+    // With the fix, the dots extend to the standard 79-char line width
+    // Without the fix, the line would be much longer to accommodate the quiet hook's name
+    cmd_snapshot!(context.filters(), context.run(), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    short....................................................................Passed
 
     ----- stderr -----
     ");
