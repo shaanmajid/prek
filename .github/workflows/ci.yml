@@ -318,24 +318,32 @@ jobs:
 
       - name: "Cargo test without uv"
         run: |
-          echo "::group::Test install uv with auto select"
+          uv_free_path=""
+          IFS=':' read -ra path_entries <<< "$PATH"
+          for entry in "${path_entries[@]}"; do
+            if [[ -z "$entry" || -x "$entry/uv" || -x "$entry/uv.exe" ]]; then
+              continue
+            fi
+            uv_free_path="${uv_free_path:+$uv_free_path:}$entry"
+          done
+          export PATH="$uv_free_path"
+
+          if command -v uv >/dev/null 2>&1; then
+            echo "::error::uv is unexpectedly available in PATH"
+            exit 1
+          fi
+          if ! command -v cargo >/dev/null 2>&1; then
+            echo "::error::cargo is unavailable after removing uv from PATH"
+            exit 1
+          fi
+
+          echo "::group::Test install uv from Astral releases"
           cargo llvm-cov nextest \
             --profile ci-core \
             --cargo-profile fast-build \
             --no-report \
             -E 'binary_id(prek::run) and test(run_basic)'
           echo "::endgroup::"
-
-          for source in github pypi aliyun pip invalid; do
-            echo "::group::Test install uv from $source"
-            export PREK_UV_SOURCE=$source
-            cargo llvm-cov nextest \
-              --profile ci-core \
-              --cargo-profile fast-build \
-              --no-report \
-              -E 'binary_id(prek::run) and test(run_basic)'
-            echo "::endgroup::"
-          done
 
           cargo llvm-cov report --profile fast-build --lcov --output-path lcov.info
 

@@ -2,13 +2,11 @@ use std::env::consts::EXE_EXTENSION;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use http::header::ACCEPT;
 use semver::{Version, VersionReq};
-use target_lexicon::{Architecture, ArmArchitecture, Environment, HOST, OperatingSystem};
-use tokio::task::JoinSet;
+use target_lexicon::HOST;
 use tracing::{debug, trace, warn};
 
 use prek_consts::env_vars::EnvVars;
@@ -17,72 +15,137 @@ use crate::fs::LockedFile;
 use crate::http::{REQWEST_CLIENT, download_and_extract};
 use crate::process::Cmd;
 use crate::store::{CacheBucket, Store};
-use crate::version;
 
 // The version range of `uv` we will install. Should update periodically.
 const CUR_UV_VERSION: &str = "0.11.19";
+const ASTRAL_BASE_URL: &str = "https://releases.astral.sh";
+const GITHUB_UV_RELEASES_URL_PREFIX: &str = "https://github.com/astral-sh/uv/releases/download/";
+const ASTRAL_UV_RELEASES_PATH: &str = "/github/uv/releases/download/";
+const UV_MANIFEST_PATH: &str = "/github/versions/main/v1/uv.ndjson";
+const PREK_UV_SOURCE: &str = "PREK_UV_SOURCE";
 static UV_VERSION_RANGE: LazyLock<VersionReq> =
     LazyLock::new(|| VersionReq::parse(">=0.7.0").unwrap());
 
-fn wheel_platform_tag_for_host(
-    operating_system: OperatingSystem,
-    architecture: Architecture,
-    environment: Environment,
-) -> Result<&'static str> {
-    let platform_tag = match (operating_system, architecture, environment) {
-        // Linux platforms
-        (OperatingSystem::Linux, Architecture::X86_64, Environment::Musl) => "musllinux_1_1_x86_64",
-        (OperatingSystem::Linux, Architecture::X86_64, _) => {
-            "manylinux_2_17_x86_64.manylinux2014_x86_64"
-        }
-        (OperatingSystem::Linux, Architecture::Aarch64(_), _) => {
-            "manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_1_aarch64"
-        }
-        (OperatingSystem::Linux, Architecture::Arm(ArmArchitecture::Armv7), Environment::Musl) => {
-            "manylinux_2_17_armv7l.manylinux2014_armv7l.musllinux_1_1_armv7l"
-        }
-        (OperatingSystem::Linux, Architecture::Arm(ArmArchitecture::Armv7), _) => {
-            "manylinux_2_17_armv7l.manylinux2014_armv7l"
-        }
-        (OperatingSystem::Linux, Architecture::Arm(ArmArchitecture::Armv6), _) => "linux_armv6l", // Raspberry Pi Zero/1
-        (OperatingSystem::Linux, Architecture::X86_32(_), Environment::Musl) => {
-            "musllinux_1_1_i686"
-        }
-        (OperatingSystem::Linux, Architecture::X86_32(_), _) => {
-            "manylinux_2_17_i686.manylinux2014_i686"
-        }
-        (OperatingSystem::Linux, Architecture::Powerpc64, _) => {
-            "manylinux_2_17_ppc64.manylinux2014_ppc64"
-        }
-        (OperatingSystem::Linux, Architecture::Powerpc64le, _) => {
-            "manylinux_2_17_ppc64le.manylinux2014_ppc64le"
-        }
-        (OperatingSystem::Linux, Architecture::S390x, _) => {
-            "manylinux_2_17_s390x.manylinux2014_s390x"
-        }
-        (OperatingSystem::Linux, Architecture::Riscv64(_), _) => "manylinux_2_31_riscv64",
-
-        // macOS platforms
-        (OperatingSystem::Darwin(_), Architecture::X86_64, _) => "macosx_10_12_x86_64",
-        (OperatingSystem::Darwin(_), Architecture::Aarch64(_), _) => "macosx_11_0_arm64",
-
-        // Windows platforms
-        (OperatingSystem::Windows, Architecture::X86_64, _) => "win_amd64",
-        (OperatingSystem::Windows, Architecture::X86_32(_), _) => "win32",
-        (OperatingSystem::Windows, Architecture::Aarch64(_), _) => "win_arm64",
-
-        _ => bail!(
-            "Unsupported platform: operating_system={operating_system:?}, architecture={architecture:?}, environment={environment:?}"
-        ),
-    };
-
-    Ok(platform_tag)
+fn uv_archive_format() -> &'static str {
+    if cfg!(windows) { "zip" } else { "tar.gz" }
 }
 
-// Get the uv wheel platform tag for the current host.
-fn get_wheel_platform_tag() -> Result<String> {
-    wheel_platform_tag_for_host(HOST.operating_system, HOST.architecture, HOST.environment)
-        .map(ToString::to_string)
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AstralSource {
+    base_url: String,
+}
+
+impl Default for AstralSource {
+    fn default() -> Self {
+        Self {
+            base_url: ASTRAL_BASE_URL.to_string(),
+        }
+    }
+}
+
+impl AstralSource {
+    fn mirror(base_url: &str) -> Result<Self> {
+        let base_url = base_url.trim_end_matches('/').to_string();
+        if base_url.is_empty() {
+            bail!("{} must not be empty", EnvVars::UV_ASTRAL_MIRROR_URL);
+        }
+
+        Ok(Self { base_url })
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base_url, path)
+    }
+
+    fn manifest_url(&self) -> String {
+        self.url(UV_MANIFEST_PATH)
+    }
+
+    fn download_url(&self, artifact: &UvArtifact) -> Result<String> {
+        let path = artifact.astral_path()?;
+        Ok(self.url(&path))
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct UvVersionManifest {
+    version: String,
+    artifacts: Vec<UvArtifact>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct UvArtifact {
+    platform: String,
+    variant: String,
+    url: String,
+    archive_format: String,
+}
+
+impl UvArtifact {
+    fn archive_name(&self) -> String {
+        format!("uv-{}.{}", self.platform, self.archive_format)
+    }
+
+    fn astral_path(&self) -> Result<String> {
+        if let Some(path) = self.url.strip_prefix(ASTRAL_BASE_URL)
+            && path.starts_with('/')
+        {
+            if !path.starts_with(ASTRAL_UV_RELEASES_PATH) {
+                bail!("uv manifest artifact URL is not an Astral uv release URL");
+            }
+            return Ok(path.to_string());
+        }
+
+        if let Some(path) = self.url.strip_prefix(GITHUB_UV_RELEASES_URL_PREFIX) {
+            return Ok(format!("{ASTRAL_UV_RELEASES_PATH}{path}"));
+        }
+
+        bail!("uv manifest artifact URL is not under a supported source")
+    }
+
+    fn matches(&self, version: &str, platform: &str, archive_format: &str) -> bool {
+        let expected_suffix = format!("/{version}/{}", self.archive_name());
+        self.platform == platform
+            && self.variant == "default"
+            && self.archive_format == archive_format
+            && self.url.ends_with(&expected_suffix)
+    }
+}
+
+fn uv_artifact_from_manifest(
+    manifest: &str,
+    version: &str,
+    platform: &str,
+    archive_format: &str,
+) -> Result<UvArtifact> {
+    for (line_index, line) in manifest.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let release: UvVersionManifest = serde_json::from_str(line)
+            .with_context(|| format!("Failed to parse uv manifest line {}", line_index + 1))?;
+        if release.version != version {
+            continue;
+        }
+
+        return release
+            .artifacts
+            .into_iter()
+            .find(|artifact| artifact.matches(version, platform, archive_format))
+            .with_context(|| {
+                format!(
+                    "Could not find uv {version} artifact for platform `{platform}` \
+                    and archive format `{archive_format}` in Astral's versions manifest. \
+                    Install a compatible system uv or set {} to a mirror that provides \
+                    the required artifact.",
+                    EnvVars::UV_ASTRAL_MIRROR_URL
+                )
+            });
+    }
+
+    bail!("Could not find uv {version} in Astral's versions manifest")
 }
 
 fn get_uv_version(uv_path: &Path) -> Result<Version> {
@@ -142,59 +205,33 @@ static UV_EXE: LazyLock<Option<(PathBuf, Version)>> = LazyLock::new(|| {
     None
 });
 
-#[derive(Debug)]
-enum PyPiMirror {
-    Pypi,
-    Tuna,
-    Aliyun,
-    Tencent,
-    Custom(String),
-}
-
-// TODO: support reading pypi source user config, or allow user to set mirror
-// TODO: allow opt-out uv
-
-impl PyPiMirror {
-    fn url(&self) -> &str {
-        match self {
-            Self::Pypi => "https://pypi.org/simple/",
-            Self::Tuna => "https://pypi.tuna.tsinghua.edu.cn/simple/",
-            Self::Aliyun => "https://mirrors.aliyun.com/pypi/simple/",
-            Self::Tencent => "https://mirrors.cloud.tencent.com/pypi/simple/",
-            Self::Custom(url) => url,
-        }
-    }
-
-    fn iter() -> impl Iterator<Item = Self> {
-        vec![Self::Pypi, Self::Tuna, Self::Aliyun, Self::Tencent].into_iter()
-    }
-}
-
-#[derive(Debug)]
-enum InstallSource {
-    /// Download uv from GitHub releases.
-    GitHub,
-    /// Download uv from `PyPi`.
-    PyPi(PyPiMirror),
-    /// Install uv by running `pip install uv`.
-    Pip,
-}
-
-impl InstallSource {
+impl AstralSource {
     async fn install(&self, store: &Store, target: &Path) -> Result<()> {
-        match self {
-            Self::GitHub => self.install_from_github(store, target).await,
-            Self::PyPi(source) => self.install_from_pypi(store, target, source).await,
-            Self::Pip => self.install_from_pip(target).await,
-        }
-    }
+        let manifest_url = self.manifest_url();
+        debug!("Fetching uv versions manifest");
+        let response = REQWEST_CLIENT
+            .get(&manifest_url)
+            .header(ACCEPT, "*/*")
+            .send()
+            .await
+            .context("Failed to fetch uv versions manifest")?;
 
-    async fn install_from_github(&self, store: &Store, target: &Path) -> Result<()> {
-        let ext = if cfg!(windows) { "zip" } else { "tar.gz" };
-        let archive_name = format!("uv-{HOST}.{ext}");
-        let download_url = format!(
-            "https://github.com/astral-sh/uv/releases/download/{CUR_UV_VERSION}/{archive_name}"
-        );
+        if !response.status().is_success() {
+            bail!(
+                "Failed to fetch uv versions manifest: {}",
+                response.status()
+            );
+        }
+
+        let manifest = response.text().await?;
+        let artifact = uv_artifact_from_manifest(
+            &manifest,
+            CUR_UV_VERSION,
+            &HOST.to_string(),
+            uv_archive_format(),
+        )?;
+        let archive_name = artifact.archive_name();
+        let download_url = self.download_url(&artifact)?;
 
         download_and_extract(&download_url, &archive_name, store, async |extracted| {
             let source = extracted.join("uv").with_extension(EXE_EXTENSION);
@@ -208,188 +245,6 @@ impl InstallSource {
         })
         .await
         .context("Failed to download and extract uv")?;
-
-        Ok(())
-    }
-
-    async fn install_from_pypi(
-        &self,
-        store: &Store,
-        target: &Path,
-        source: &PyPiMirror,
-    ) -> Result<()> {
-        let platform_tag = get_wheel_platform_tag()?;
-        let wheel_name = format!("uv-{CUR_UV_VERSION}-py3-none-{platform_tag}.whl");
-
-        // Use PyPI JSON API instead of parsing HTML
-        let api_url = match source {
-            PyPiMirror::Pypi => format!("https://pypi.org/pypi/uv/{CUR_UV_VERSION}/json"),
-            // For mirrors, we'll fall back to simple API approach
-            _ => return self.install_from_simple_api(store, target, source).await,
-        };
-
-        debug!("Fetching uv metadata from: {}", api_url);
-        let response = REQWEST_CLIENT
-            .get(&api_url)
-            .header("Accept", "*/*")
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            bail!(
-                "Failed to fetch uv metadata from PyPI: {}",
-                response.status()
-            );
-        }
-
-        let metadata: serde_json::Value = response.json().await?;
-        let files = metadata["urls"]
-            .as_array()
-            .context("Invalid PyPI response: missing urls")?;
-
-        let wheel_file = files
-            .iter()
-            .find(|file| {
-                file["filename"].as_str() == Some(&wheel_name)
-                    && file["packagetype"].as_str() == Some("bdist_wheel")
-                    && file["yanked"].as_bool() != Some(true)
-            })
-            .with_context(|| format!("Could not find wheel for {wheel_name} in PyPI response"))?;
-
-        let download_url = wheel_file["url"]
-            .as_str()
-            .context("Missing download URL in PyPI response")?;
-
-        self.download_and_extract_wheel(store, target, &wheel_name, download_url)
-            .await
-    }
-
-    async fn install_from_simple_api(
-        &self,
-        store: &Store,
-        target: &Path,
-        source: &PyPiMirror,
-    ) -> Result<()> {
-        // Fallback for mirrors that don't support JSON API
-        let platform_tag = get_wheel_platform_tag()?;
-        let wheel_name = format!("uv-{CUR_UV_VERSION}-py3-none-{platform_tag}.whl");
-
-        let simple_url = format!("{}uv/", source.url());
-
-        debug!("Fetching from simple API: {}", simple_url);
-        let response = REQWEST_CLIENT
-            .get(&simple_url)
-            .header(ACCEPT, "*/*")
-            .send()
-            .await?;
-        let html = response.text().await?;
-
-        // Simple string search to find the wheel download link
-        let search_pattern = r#"href=""#.to_string();
-
-        let download_path = html
-            .lines()
-            .find(|line| line.contains(&wheel_name))
-            .and_then(|line| {
-                if let Some(start) = line.find(&search_pattern) {
-                    let start = start + search_pattern.len();
-                    if let Some(end) = line[start..].find('"') {
-                        return Some(&line[start..start + end]);
-                    }
-                }
-                None
-            })
-            .with_context(|| {
-                format!(
-                    "Could not find wheel download link for {wheel_name} in simple API response"
-                )
-            })?;
-
-        // Resolve relative URLs
-        let download_url = if download_path.starts_with("http") {
-            download_path.to_string()
-        } else {
-            format!("{simple_url}{download_path}")
-        };
-
-        self.download_and_extract_wheel(store, target, &wheel_name, &download_url)
-            .await
-    }
-
-    async fn download_and_extract_wheel(
-        &self,
-        store: &Store,
-        target: &Path,
-        filename: &str,
-        download_url: &str,
-    ) -> Result<()> {
-        download_and_extract(download_url, filename, store, async |extracted| {
-            // Find the uv binary in the extracted contents
-            let data_dir = format!("uv-{CUR_UV_VERSION}.data");
-            let extracted_uv = extracted
-                .join(data_dir)
-                .join("scripts")
-                .join("uv")
-                .with_extension(EXE_EXTENSION);
-
-            // Copy the binary to the target location
-            let target_path = target.join("uv").with_extension(EXE_EXTENSION);
-
-            debug!(?extracted_uv, target = %target_path.display(), "Moving uv to target");
-            replace_uv_binary(&extracted_uv, &target_path).await?;
-
-            // Set executable permissions on Unix
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let metadata = fs_err::tokio::metadata(&target_path).await?;
-                let mut perms = metadata.permissions();
-                perms.set_mode(0o755);
-                fs_err::tokio::set_permissions(&target_path, perms).await?;
-            }
-
-            Ok(())
-        })
-        .await
-        .context("Failed to download and extract uv wheel")?;
-
-        Ok(())
-    }
-
-    async fn install_from_pip(&self, target: &Path) -> Result<()> {
-        // When running `pip install` in multiple threads, it can fail
-        // without extracting files properly.
-        Cmd::new("python3", "pip install uv")
-            .arg("-m")
-            .arg("pip")
-            .arg("install")
-            .arg("--prefix")
-            .arg(target)
-            .arg("--only-binary=:all:")
-            .arg("--progress-bar=off")
-            .arg("--disable-pip-version-check")
-            .arg(format!("uv=={CUR_UV_VERSION}"))
-            .check(true)
-            .output()
-            .await?;
-
-        let local_dir = target.join("local");
-        let uv_src = if local_dir.is_dir() {
-            &local_dir
-        } else {
-            target
-        };
-
-        let bin_dir = uv_src.join(if cfg!(windows) { "Scripts" } else { "bin" });
-        let lib_dir = uv_src.join(if cfg!(windows) { "Lib" } else { "lib" });
-
-        let uv = uv_src
-            .join(&bin_dir)
-            .join("uv")
-            .with_extension(EXE_EXTENSION);
-        fs_err::tokio::rename(&uv, target.join("uv").with_extension(EXE_EXTENSION)).await?;
-        fs_err::tokio::remove_dir_all(bin_dir).await?;
-        fs_err::tokio::remove_dir_all(lib_dir).await?;
 
         Ok(())
     }
@@ -408,67 +263,6 @@ impl Uv {
         let mut cmd = Cmd::new(&self.path, summary);
         cmd.env(EnvVars::UV_CACHE_DIR, store.cache_path(CacheBucket::Uv));
         cmd
-    }
-
-    async fn select_source() -> Result<InstallSource> {
-        async fn check_github() -> Result<bool> {
-            let url = format!(
-                "https://github.com/astral-sh/uv/releases/download/{CUR_UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz"
-            );
-            let response = REQWEST_CLIENT
-                .head(url)
-                .timeout(Duration::from_secs(3))
-                .send()
-                .await?;
-            trace!(?response, "Checked GitHub");
-            Ok(response.status().is_success())
-        }
-
-        async fn select_best_pypi() -> Result<PyPiMirror> {
-            let mut best = PyPiMirror::Pypi;
-            let mut tasks = PyPiMirror::iter()
-                .map(|source| {
-                    let client = REQWEST_CLIENT.clone();
-                    async move {
-                        let url = format!("{}uv/", source.url());
-                        let response = client
-                            .head(&url)
-                            .header("User-Agent", format!("prek/{}", version::version().version))
-                            .header("Accept", "*/*")
-                            .timeout(Duration::from_secs(2))
-                            .send()
-                            .await;
-                        (source, response)
-                    }
-                })
-                .collect::<JoinSet<_>>();
-
-            while let Some(result) = tasks.join_next().await {
-                if let Ok((source, response)) = result {
-                    if let Ok(resp) = response
-                        && resp.status().is_success()
-                    {
-                        best = source;
-                        break;
-                    }
-                }
-            }
-
-            Ok(best)
-        }
-
-        let source = tokio::select! {
-                Ok(true) = check_github() => InstallSource::GitHub,
-                Ok(source) = select_best_pypi() => InstallSource::PyPi(source),
-                else => {
-                    warn!("Failed to check uv source availability, falling back to pip install");
-                    InstallSource::Pip
-                }
-
-        };
-
-        trace!(?source, "Selected uv source");
-        Ok(source)
     }
 
     pub(crate) async fn install(store: &Store, uv_dir: &Path) -> Result<Self> {
@@ -530,11 +324,8 @@ impl Uv {
             }
         }
 
-        let source = if let Some(uv_source) = uv_source_from_env() {
-            uv_source
-        } else {
-            Self::select_source().await?
-        };
+        let source = astral_source_from_env()?;
+        trace!(?source, "Selected uv source");
         source.install(store, uv_dir).await?;
 
         // Downloaded `uv` binaries can be present on disk but still fail to execute in the
@@ -556,20 +347,22 @@ impl Uv {
     }
 }
 
-fn uv_source_from_env() -> Option<InstallSource> {
-    let var = EnvVars::var(EnvVars::PREK_UV_SOURCE).ok()?;
-    match var.as_str() {
-        "github" => Some(InstallSource::GitHub),
-        "pypi" => Some(InstallSource::PyPi(PyPiMirror::Pypi)),
-        "tuna" => Some(InstallSource::PyPi(PyPiMirror::Tuna)),
-        "aliyun" => Some(InstallSource::PyPi(PyPiMirror::Aliyun)),
-        "tencent" => Some(InstallSource::PyPi(PyPiMirror::Tencent)),
-        "pip" => Some(InstallSource::Pip),
-        custom if custom.starts_with("http") => Some(InstallSource::PyPi(PyPiMirror::Custom(var))),
-        _ => {
-            warn!("Invalid UV_SOURCE value: {}", var);
-            None
-        }
+fn astral_source_from_env() -> Result<AstralSource> {
+    if EnvVars::is_set(PREK_UV_SOURCE) {
+        warn!(
+            "{PREK_UV_SOURCE} is no longer supported; prek installs managed uv from Astral releases. \
+            Use {} to configure a releases-compatible mirror.",
+            EnvVars::UV_ASTRAL_MIRROR_URL
+        );
+    }
+    astral_source_from_mirror_url(EnvVars::var(EnvVars::UV_ASTRAL_MIRROR_URL).ok())
+}
+
+fn astral_source_from_mirror_url(mirror_url: Option<String>) -> Result<AstralSource> {
+    if let Some(mirror_url) = mirror_url {
+        AstralSource::mirror(&mirror_url)
+    } else {
+        Ok(AstralSource::default())
     }
 }
 
@@ -588,100 +381,201 @@ mod tests {
     }
 
     #[test]
-    fn wheel_platform_tag_x86_64_linux_gnu() -> Result<()> {
-        let tag = wheel_platform_tag_for_host(
-            OperatingSystem::Linux,
-            Architecture::X86_64,
-            Environment::Gnu,
-        )?;
-        assert_eq!(tag, "manylinux_2_17_x86_64.manylinux2014_x86_64");
-        Ok(())
-    }
+    fn parses_manifest_and_selects_default_host_artifact() -> Result<()> {
+        let manifest = r#"
+{"version":"0.11.13","date":"2026-05-01T00:00:00Z","artifacts":[{"platform":"x86_64-unknown-linux-gnu","variant":"default","url":"https://github.com/astral-sh/uv/releases/download/0.11.13/uv-x86_64-unknown-linux-gnu.tar.gz","archive_format":"tar.gz","sha256":"ignored"}]}
+{"version":"0.11.14","date":"2026-05-02T00:00:00Z","artifacts":[{"platform":"x86_64-unknown-linux-gnu","variant":"minimal","url":"https://github.com/astral-sh/uv/releases/download/0.11.14/uv-x86_64-unknown-linux-gnu.tar.gz","archive_format":"tar.gz","sha256":"ignored"},{"platform":"x86_64-unknown-linux-gnu","variant":"default","url":"https://github.com/astral-sh/uv/releases/download/0.11.14/uv-x86_64-unknown-linux-gnu.tar.gz","archive_format":"tar.gz","sha256":"ignored"},{"platform":"aarch64-apple-darwin","variant":"default","url":"https://github.com/astral-sh/uv/releases/download/0.11.14/uv-aarch64-apple-darwin.tar.gz","archive_format":"tar.gz","sha256":"ignored"},{"platform":"x86_64-pc-windows-msvc","variant":"default","url":"https://github.com/astral-sh/uv/releases/download/0.11.14/uv-x86_64-pc-windows-msvc.zip","archive_format":"zip","sha256":"ignored"}]}
+"#;
 
-    #[test]
-    fn wheel_platform_tag_x86_64_linux_musl() -> Result<()> {
-        let tag = wheel_platform_tag_for_host(
-            OperatingSystem::Linux,
-            Architecture::X86_64,
-            Environment::Musl,
-        )?;
-        assert_eq!(tag, "musllinux_1_1_x86_64");
-        Ok(())
-    }
+        let artifact =
+            uv_artifact_from_manifest(manifest, "0.11.14", "x86_64-unknown-linux-gnu", "tar.gz")?;
 
-    #[test]
-    fn wheel_platform_tag_i686_linux_gnu() -> Result<()> {
-        let tag = wheel_platform_tag_for_host(
-            OperatingSystem::Linux,
-            Architecture::X86_32(target_lexicon::X86_32Architecture::I686),
-            Environment::Gnu,
-        )?;
-        assert_eq!(tag, "manylinux_2_17_i686.manylinux2014_i686");
-        Ok(())
-    }
-
-    #[test]
-    fn wheel_platform_tag_i686_linux_musl() -> Result<()> {
-        let tag = wheel_platform_tag_for_host(
-            OperatingSystem::Linux,
-            Architecture::X86_32(target_lexicon::X86_32Architecture::I686),
-            Environment::Musl,
-        )?;
-        assert_eq!(tag, "musllinux_1_1_i686");
-        Ok(())
-    }
-
-    #[test]
-    fn wheel_platform_tag_aarch64_linux_gnu() -> Result<()> {
-        let tag = wheel_platform_tag_for_host(
-            OperatingSystem::Linux,
-            Architecture::Aarch64(target_lexicon::Aarch64Architecture::Aarch64),
-            Environment::Gnu,
-        )?;
+        assert_eq!(artifact.platform, "x86_64-unknown-linux-gnu");
+        assert_eq!(artifact.variant, "default");
         assert_eq!(
-            tag,
-            "manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_1_aarch64"
+            artifact.archive_name(),
+            "uv-x86_64-unknown-linux-gnu.tar.gz"
         );
         Ok(())
     }
 
     #[test]
-    fn wheel_platform_tag_aarch64_linux_musl() -> Result<()> {
-        let tag = wheel_platform_tag_for_host(
-            OperatingSystem::Linux,
-            Architecture::Aarch64(target_lexicon::Aarch64Architecture::Aarch64),
-            Environment::Musl,
-        )?;
-        // aarch64 uses a single dual-tagged wheel for both glibc and musl
+    fn manifest_selection_requires_matching_version_platform_and_format() {
+        let manifest = r#"
+{"version":"0.11.14","artifacts":[{"platform":"x86_64-unknown-linux-gnu","variant":"default","url":"https://github.com/astral-sh/uv/releases/download/0.11.14/uv-x86_64-unknown-linux-gnu.tar.gz","archive_format":"tar.gz","sha256":"ignored"}]}
+"#;
+
+        assert!(
+            uv_artifact_from_manifest(manifest, "0.11.13", "x86_64-unknown-linux-gnu", "tar.gz")
+                .is_err()
+        );
+        assert!(
+            uv_artifact_from_manifest(manifest, "0.11.14", "aarch64-apple-darwin", "tar.gz")
+                .is_err()
+        );
+        assert!(
+            uv_artifact_from_manifest(manifest, "0.11.14", "x86_64-unknown-linux-gnu", "zip")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn manifest_selection_requires_matching_artifact_url() {
+        let wrong_filename_manifest = r#"
+{"version":"0.11.14","artifacts":[{"platform":"x86_64-unknown-linux-gnu","variant":"default","url":"https://github.com/astral-sh/uv/releases/download/0.11.14/uv-aarch64-unknown-linux-gnu.tar.gz","archive_format":"tar.gz","sha256":"ignored"}]}
+"#;
+        let wrong_version_manifest = r#"
+{"version":"0.11.14","artifacts":[{"platform":"x86_64-unknown-linux-gnu","variant":"default","url":"https://github.com/astral-sh/uv/releases/download/0.11.13/uv-x86_64-unknown-linux-gnu.tar.gz","archive_format":"tar.gz","sha256":"ignored"}]}
+"#;
+
+        assert!(
+            uv_artifact_from_manifest(
+                wrong_filename_manifest,
+                "0.11.14",
+                "x86_64-unknown-linux-gnu",
+                "tar.gz",
+            )
+            .is_err()
+        );
+        assert!(
+            uv_artifact_from_manifest(
+                wrong_version_manifest,
+                "0.11.14",
+                "x86_64-unknown-linux-gnu",
+                "tar.gz",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn astral_source_builds_default_urls() -> Result<()> {
+        let source = AstralSource::default();
+        let artifact = UvArtifact {
+            platform: "x86_64-unknown-linux-gnu".to_string(),
+            variant: "default".to_string(),
+            url: "https://github.com/astral-sh/uv/releases/download/0.11.14/uv-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+            archive_format: "tar.gz".to_string(),
+        };
+
         assert_eq!(
-            tag,
-            "manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_1_aarch64"
+            source.manifest_url(),
+            "https://releases.astral.sh/github/versions/main/v1/uv.ndjson"
+        );
+        assert_eq!(
+            source.download_url(&artifact)?,
+            "https://releases.astral.sh/github/uv/releases/download/0.11.14/uv-x86_64-unknown-linux-gnu.tar.gz"
         );
         Ok(())
     }
 
     #[test]
-    fn wheel_platform_tag_armv7_linux_gnu() -> Result<()> {
-        let tag = wheel_platform_tag_for_host(
-            OperatingSystem::Linux,
-            Architecture::Arm(ArmArchitecture::Armv7),
-            Environment::Gnu,
-        )?;
-        assert_eq!(tag, "manylinux_2_17_armv7l.manylinux2014_armv7l");
+    fn astral_mirror_replaces_releases_base_url() -> Result<()> {
+        let source = AstralSource::mirror("https://mirror.example.com/astral///")?;
+        let artifact = UvArtifact {
+            platform: "x86_64-unknown-linux-gnu".to_string(),
+            variant: "default".to_string(),
+            url: "https://github.com/astral-sh/uv/releases/download/0.11.14/uv-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+            archive_format: "tar.gz".to_string(),
+        };
+
+        assert_eq!(
+            source.manifest_url(),
+            "https://mirror.example.com/astral/github/versions/main/v1/uv.ndjson"
+        );
+        assert_eq!(
+            source.download_url(&artifact)?,
+            "https://mirror.example.com/astral/github/uv/releases/download/0.11.14/uv-x86_64-unknown-linux-gnu.tar.gz"
+        );
         Ok(())
     }
 
     #[test]
-    fn wheel_platform_tag_armv7_linux_musl() -> Result<()> {
-        let tag = wheel_platform_tag_for_host(
-            OperatingSystem::Linux,
-            Architecture::Arm(ArmArchitecture::Armv7),
-            Environment::Musl,
-        )?;
+    fn astral_mirror_rejects_non_astral_artifact_urls() -> Result<()> {
+        let source = AstralSource::mirror("https://mirror.example.com/astral")?;
+        let wrong_host_artifact = UvArtifact {
+            platform: "x86_64-unknown-linux-gnu".to_string(),
+            variant: "default".to_string(),
+            url: "https://example.com/astral-sh/uv/releases/download/0.11.14/uv-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+            archive_format: "tar.gz".to_string(),
+        };
+        let wrong_github_repo_artifact = UvArtifact {
+            platform: "x86_64-unknown-linux-gnu".to_string(),
+            variant: "default".to_string(),
+            url: "https://github.com/astral-sh/ruff/releases/download/0.11.14/uv-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+            archive_format: "tar.gz".to_string(),
+        };
+        let wrong_astral_repo_artifact = UvArtifact {
+            platform: "x86_64-unknown-linux-gnu".to_string(),
+            variant: "default".to_string(),
+            url: "https://releases.astral.sh/github/ruff/releases/download/0.11.14/uv-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+            archive_format: "tar.gz".to_string(),
+        };
+
+        assert!(source.download_url(&wrong_host_artifact).is_err());
+        assert!(source.download_url(&wrong_github_repo_artifact).is_err());
+        assert!(source.download_url(&wrong_astral_repo_artifact).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn astral_source_preserves_already_mirrored_artifact_urls() -> Result<()> {
+        let source = AstralSource::default();
+        let artifact = UvArtifact {
+            platform: "x86_64-unknown-linux-gnu".to_string(),
+            variant: "default".to_string(),
+            url: "https://releases.astral.sh/github/uv/releases/download/0.11.14/uv-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+            archive_format: "tar.gz".to_string(),
+        };
+
         assert_eq!(
-            tag,
-            "manylinux_2_17_armv7l.manylinux2014_armv7l.musllinux_1_1_armv7l"
+            source.download_url(&artifact)?,
+            "https://releases.astral.sh/github/uv/releases/download/0.11.14/uv-x86_64-unknown-linux-gnu.tar.gz"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn env_selection_uses_default_astral_source() -> Result<()> {
+        let source = astral_source_from_mirror_url(None)?;
+
+        assert!(source.base_url == "https://releases.astral.sh");
+        Ok(())
+    }
+
+    #[test]
+    fn env_selection_uses_astral_mirror() -> Result<()> {
+        let source =
+            astral_source_from_mirror_url(Some("https://mirror.example.com/astral/".to_string()))?;
+
+        assert!(source.base_url == "https://mirror.example.com/astral");
+        Ok(())
+    }
+
+    #[test]
+    fn env_selection_rejects_empty_astral_mirror() {
+        let source = astral_source_from_mirror_url(Some("///".to_string()));
+        assert!(source.is_err());
+    }
+
+    #[test]
+    fn parses_manifest_for_current_host_artifact() -> Result<()> {
+        let manifest = format!(
+            r#"{{"version":"{CUR_UV_VERSION}","date":"2026-05-02T00:00:00Z","artifacts":[{{"platform":"{}","variant":"default","url":"https://github.com/astral-sh/uv/releases/download/{CUR_UV_VERSION}/uv-{}.{}","archive_format":"{}","sha256":"ignored"}}]}}"#,
+            HOST,
+            HOST,
+            uv_archive_format(),
+            uv_archive_format(),
+        );
+
+        let artifact = uv_artifact_from_manifest(
+            &manifest,
+            CUR_UV_VERSION,
+            &HOST.to_string(),
+            uv_archive_format(),
+        )?;
+        assert_eq!(artifact.platform, HOST.to_string());
+        assert_eq!(artifact.archive_format, uv_archive_format());
         Ok(())
     }
 

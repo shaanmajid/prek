@@ -45,20 +45,13 @@ If you encounter "Too many open files" errors, lowering this value or raising th
 Disable Rust-native built-in hooks; always use the original hook implementation.
 See [Built-in Fast Hooks](../builtin.md) for details.
 
-### `PREK_UV_SOURCE`
+### `UV_ASTRAL_MIRROR_URL`
 
-Control how uv (Python package installer) is installed.
-Options:
+Override the Astral releases mirror used when `prek` installs uv from Astral's versions manifest.
+The configured URL replaces `https://releases.astral.sh`; path components are preserved.
 
-- `github` (download from GitHub releases)
-- `pypi` (install from PyPI)
-- `tuna` (use Tsinghua University mirror)
-- `aliyun` (use Alibaba Cloud mirror)
-- `tencent` (use Tencent Cloud mirror)
-- `pip` (install via pip)
-- a custom PyPI mirror URL
-
-If not set, prek automatically selects the best available source.
+`PREK_UV_SOURCE` is no longer supported. Managed uv installs use Astral release artifacts; use a
+compatible system `uv` or `UV_ASTRAL_MIRROR_URL` for private/vetted mirrors.
 
 ### `PREK_NATIVE_TLS`
 
