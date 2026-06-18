@@ -341,6 +341,9 @@ fn infer_retry_constraint_from_error(error: &process::Error) -> Option<InferredR
 
 fn infer_retry_constraint(stderr: &str) -> Option<InferredRetryConstraint> {
     static PYTHON_BOUND: LazyLock<Regex> = LazyLock::new(|| {
+        // uv does not expose structured resolver diagnostics for this case yet,
+        // so retry inference intentionally parses the narrow human-readable
+        // explanation and fails closed if that wording changes.
         Regex::new(r"does not satisfy\s+Python\s*(>=|>)\s*([0-9]+(?:\.[0-9]+){0,2})")
             .expect("inferred Python bound regex must be valid")
     });
