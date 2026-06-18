@@ -2,6 +2,7 @@ use anyhow::Result;
 
 use crate::hook::Hook;
 
+mod inferred_retry;
 mod pep723;
 mod pyproject;
 #[allow(clippy::module_inception)]

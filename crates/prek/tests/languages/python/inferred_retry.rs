@@ -1,9 +1,6 @@
-#![cfg(unix)]
-
-mod common;
-
+use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use anyhow::Result;
@@ -178,25 +175,33 @@ fn configure_remote_hook(context: &TestContext, repo: &TestContext) -> Result<()
     Ok(())
 }
 
-fn fake_uv_env(context: &TestContext) -> Result<(std::ffi::OsString, PathBuf, PathBuf)> {
-    let log_path = context.work_dir().child("fake-uv.log").to_path_buf();
-    let state_path = context.work_dir().child("fake-uv.state").to_path_buf();
-
-    fs_err::write(&log_path, "")?;
-    fs_err::write(&state_path, "0")?;
-
-    Ok((
-        prepend_paths(&[FAKE_UV_BIN_DIR.as_path()])?,
-        log_path,
-        state_path,
-    ))
+struct FakeUv {
+    path: OsString,
+    log_path: PathBuf,
+    state_path: PathBuf,
 }
 
-fn command_log(path: &Path) -> Result<Vec<String>> {
-    Ok(fs_err::read_to_string(path)?
-        .lines()
-        .map(ToString::to_string)
-        .collect())
+impl FakeUv {
+    fn new(context: &TestContext) -> Result<Self> {
+        let log_path = context.work_dir().child("fake-uv.log").to_path_buf();
+        let state_path = context.work_dir().child("fake-uv.state").to_path_buf();
+
+        fs_err::write(&log_path, "")?;
+        fs_err::write(&state_path, "0")?;
+
+        Ok(Self {
+            path: prepend_paths(&[FAKE_UV_BIN_DIR.as_path()])?,
+            log_path,
+            state_path,
+        })
+    }
+
+    fn command_log(&self) -> Result<Vec<String>> {
+        Ok(fs_err::read_to_string(&self.log_path)?
+            .lines()
+            .map(ToString::to_string)
+            .collect())
+    }
 }
 
 #[test]
@@ -206,13 +211,13 @@ fn inferred_retry_recreates_venv_and_retries_install() -> Result<()> {
     configure_hook(&context, None);
     context.git_add(".");
 
-    let (path, log_path, state_path) = fake_uv_env(&context)?;
+    let fake_uv = FakeUv::new(&context)?;
     let output = context
         .command()
         .arg("install-hooks")
-        .env(EnvVars::PATH, path)
-        .env("PREK_FAKE_UV_LOG", &log_path)
-        .env("PREK_FAKE_UV_STATE", &state_path)
+        .env(EnvVars::PATH, &fake_uv.path)
+        .env("PREK_FAKE_UV_LOG", &fake_uv.log_path)
+        .env("PREK_FAKE_UV_STATE", &fake_uv.state_path)
         .env("PREK_FAKE_UV_WRAP_BOUND", "1")
         .output()?;
 
@@ -222,7 +227,7 @@ fn inferred_retry_recreates_venv_and_retries_install() -> Result<()> {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let commands = command_log(&log_path)?;
+    let commands = fake_uv.command_log()?;
     let pip_install_calls = commands
         .iter()
         .filter(|command| command.starts_with("pip\tinstall\t"))
@@ -250,13 +255,13 @@ fn inferred_retry_retries_remote_repo_install() -> Result<()> {
     configure_remote_hook(&context, &repo)?;
     context.git_add(".");
 
-    let (path, log_path, state_path) = fake_uv_env(&context)?;
+    let fake_uv = FakeUv::new(&context)?;
     let output = context
         .command()
         .arg("install-hooks")
-        .env(EnvVars::PATH, path)
-        .env("PREK_FAKE_UV_LOG", &log_path)
-        .env("PREK_FAKE_UV_STATE", &state_path)
+        .env(EnvVars::PATH, &fake_uv.path)
+        .env("PREK_FAKE_UV_LOG", &fake_uv.log_path)
+        .env("PREK_FAKE_UV_STATE", &fake_uv.state_path)
         .output()?;
 
     assert!(
@@ -265,7 +270,7 @@ fn inferred_retry_retries_remote_repo_install() -> Result<()> {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let commands = command_log(&log_path)?;
+    let commands = fake_uv.command_log()?;
     let remote_installs = commands
         .iter()
         .filter(|command| {
@@ -288,135 +293,19 @@ fn inferred_retry_retries_remote_repo_install() -> Result<()> {
 }
 
 #[test]
-fn major_only_inferred_retry_uses_next_minor_cap() -> Result<()> {
-    let context = TestContext::new();
-    context.init_project();
-    configure_hook(&context, None);
-    context.git_add(".");
-
-    let (path, log_path, state_path) = fake_uv_env(&context)?;
-    let output = context
-        .command()
-        .arg("install-hooks")
-        .env(EnvVars::PATH, path)
-        .env("PREK_FAKE_UV_LOG", &log_path)
-        .env("PREK_FAKE_UV_STATE", &state_path)
-        .env("PREK_FAKE_UV_ERROR_BOUND", ">=3")
-        .output()?;
-
-    assert!(
-        output.status.success(),
-        "expected install-hooks success, stderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let commands = command_log(&log_path)?;
-    assert!(
-        commands.iter().any(|command| {
-            command.starts_with("venv\t")
-                && command.contains("\t--clear\t")
-                && command.contains("\t--python\t>=3,<3.1\t")
-        }),
-        "commands: {commands:?}"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn explicit_upper_bound_narrows_inferred_retry() -> Result<()> {
-    let context = TestContext::new();
-    context.init_project();
-    configure_hook(&context, Some(">=3.10,<3.10.5"));
-    context.git_add(".");
-
-    let (path, log_path, state_path) = fake_uv_env(&context)?;
-    let output = context
-        .command()
-        .arg("install-hooks")
-        .env(EnvVars::PATH, path)
-        .env("PREK_FAKE_UV_LOG", &log_path)
-        .env("PREK_FAKE_UV_STATE", &state_path)
-        .output()?;
-
-    assert!(
-        output.status.success(),
-        "expected install-hooks success, stderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let commands = command_log(&log_path)?;
-    assert!(
-        commands.iter().any(|command| {
-            command.starts_with("venv\t")
-                && command.contains("\t--clear\t")
-                && command.contains("\t--python\t>=3.10,<3.10.5\t")
-        }),
-        "commands: {commands:?}"
-    );
-    assert!(
-        !commands
-            .iter()
-            .any(|command| command.contains("\t--python\t>=3.10,<3.11\t")),
-        "commands: {commands:?}"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn incompatible_explicit_range_does_not_retry() -> Result<()> {
-    let context = TestContext::new();
-    context.init_project();
-    configure_hook(&context, Some("<3.10"));
-    context.git_add(".");
-
-    let (path, log_path, state_path) = fake_uv_env(&context)?;
-    let output = context
-        .command()
-        .arg("install-hooks")
-        .env(EnvVars::PATH, path)
-        .env("PREK_FAKE_UV_LOG", &log_path)
-        .env("PREK_FAKE_UV_STATE", &state_path)
-        .output()?;
-
-    assert!(
-        !output.status.success(),
-        "expected install-hooks failure, stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let commands = command_log(&log_path)?;
-    let pip_install_calls = commands
-        .iter()
-        .filter(|command| command.starts_with("pip\tinstall\t"))
-        .count();
-    assert_eq!(pip_install_calls, 1, "commands: {commands:?}");
-    assert!(
-        !commands
-            .iter()
-            .any(|command| command.starts_with("venv\t") && command.contains("\t--clear\t")),
-        "commands: {commands:?}"
-    );
-
-    Ok(())
-}
-
-#[test]
 fn system_language_version_does_not_retry_with_inferred_constraint() -> Result<()> {
     let context = TestContext::new();
     context.init_project();
     configure_hook(&context, Some("system"));
     context.git_add(".");
 
-    let (path, log_path, state_path) = fake_uv_env(&context)?;
+    let fake_uv = FakeUv::new(&context)?;
     let output = context
         .command()
         .arg("install-hooks")
-        .env(EnvVars::PATH, path)
-        .env("PREK_FAKE_UV_LOG", &log_path)
-        .env("PREK_FAKE_UV_STATE", &state_path)
+        .env(EnvVars::PATH, &fake_uv.path)
+        .env("PREK_FAKE_UV_LOG", &fake_uv.log_path)
+        .env("PREK_FAKE_UV_STATE", &fake_uv.state_path)
         .output()?;
 
     assert!(
@@ -426,7 +315,7 @@ fn system_language_version_does_not_retry_with_inferred_constraint() -> Result<(
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let commands = command_log(&log_path)?;
+    let commands = fake_uv.command_log()?;
     let pip_install_calls = commands
         .iter()
         .filter(|command| command.starts_with("pip\tinstall\t"))

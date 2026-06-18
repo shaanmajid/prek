@@ -5,6 +5,9 @@ use prek_consts::env_vars::EnvVars;
 
 use crate::common::{TestContext, cmd_snapshot};
 
+#[cfg(unix)]
+mod inferred_retry;
+
 /// Test `language_version` parsing and downloading.
 /// We use `setup-python` action to install Python 3.12 in CI, when running tests uv can find them.
 /// Other versions may need to be downloaded while running the tests.
