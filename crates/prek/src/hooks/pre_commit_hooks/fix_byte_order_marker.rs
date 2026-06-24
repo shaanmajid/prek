@@ -23,11 +23,7 @@ pub(crate) async fn fix_byte_order_marker(
 async fn fix_file(file_base: &Path, filename: &Path) -> Result<(i32, Vec<u8>)> {
     let file_path = file_base.join(filename);
 
-    let mut file = fs_err::tokio::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&file_path)
-        .await?;
+    let mut file = fs_err::tokio::File::open(&file_path).await?;
 
     let mut bom_buffer = [0u8; 3];
     match file.read_exact(&mut bom_buffer).await {
@@ -38,6 +34,13 @@ async fn fix_file(file_base: &Path, filename: &Path) -> Result<(i32, Vec<u8>)> {
     if bom_buffer != UTF8_BOM {
         return Ok((0, Vec::new()));
     }
+    drop(file);
+
+    let mut file = fs_err::tokio::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&file_path)
+        .await?;
 
     let file_len = file.seek(SeekFrom::End(0)).await?;
     if file_len == UTF8_BOM.len() as u64 {
@@ -116,6 +119,31 @@ mod tests {
 
         let (code, output) = fix_file(Path::new(""), &file_path).await?;
 
+        assert_eq!(code, 0);
+        assert!(output.is_empty());
+
+        let new_content = fs_err::tokio::read(&file_path).await?;
+        assert_eq!(new_content, content);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_file_without_bom_does_not_need_write_access() -> Result<()> {
+        let dir = tempdir()?;
+        let content = b"Hello, World!";
+        let file_path = create_test_file(&dir, "without_bom_read_only.txt", content).await?;
+
+        let original_permissions = std::fs::metadata(&file_path)?.permissions();
+        let mut readonly_permissions = original_permissions.clone();
+        readonly_permissions.set_readonly(true);
+        std::fs::set_permissions(&file_path, readonly_permissions)?;
+
+        let result = fix_file(Path::new(""), &file_path).await;
+
+        std::fs::set_permissions(&file_path, original_permissions)?;
+
+        let (code, output) = result?;
         assert_eq!(code, 0);
         assert!(output.is_empty());
 
