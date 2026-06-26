@@ -219,7 +219,7 @@ async fn run_legacy(
         return Ok(0);
     }
 
-    let entry = resolve_command(vec![legacy_hook.to_string_lossy().into_owned()], None);
+    let entry = resolve_command(vec![legacy_hook.to_string_lossy().into_owned()], None, &CWD);
     let mut cmd = Cmd::new(&entry[0], format!("legacy hook `{}`", hook_type.as_ref()));
     cmd.check(false).args(&entry[1..]).args(args);
     cmd.env(EnvVars::PREK_RUNNING_LEGACY, "1");

@@ -129,7 +129,9 @@ impl LanguageImpl for Dotnet {
         let dotnet_root = resolve_dotnet_root(dotnet).context("Failed to resolve DOTNET_ROOT")?;
 
         let new_path = prepend_paths(&[&tools_dir, &dotnet_root]).context("Failed to join PATH")?;
-        let entry = hook.entry.resolve(Some(&new_path), store)?;
+        let entry = hook
+            .entry
+            .resolve(hook.work_dir(), Some(&new_path), store)?;
 
         let run = async |batch: &[&Path]| {
             let mut output = Cmd::new(&entry[0], "run dotnet hook")

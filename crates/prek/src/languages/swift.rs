@@ -190,7 +190,9 @@ impl LanguageImpl for Swift {
                 EnvVars::var_os(EnvVars::PATH).unwrap_or_default()
             };
 
-        let entry = hook.entry.resolve(Some(&new_path), store)?;
+        let entry = hook
+            .entry
+            .resolve(hook.work_dir(), Some(&new_path), store)?;
 
         let run = async |batch: &[&Path]| {
             let mut output = Cmd::new(&entry[0], "swift hook")

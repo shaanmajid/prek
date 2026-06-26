@@ -173,7 +173,9 @@ impl LanguageImpl for Coursier {
         let env_path = hook.env_path().expect("Coursier must have env path");
         let coursier_cache = store.cache_path(CacheBucket::Coursier);
         let path_env = prepend_paths(&[env_path]).context("Failed to join PATH")?;
-        let entry = hook.entry.resolve(Some(&path_env), store)?;
+        let entry = hook
+            .entry
+            .resolve(hook.work_dir(), Some(&path_env), store)?;
 
         let run = async |batch: &[&Path]| {
             let mut output = Cmd::new(&entry[0], "run coursier hook")

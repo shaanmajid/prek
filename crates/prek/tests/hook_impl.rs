@@ -703,6 +703,154 @@ fn workspace_hook_impl_root() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn workspace_relative_direct_entry_resolves_from_hook_work_dir() -> anyhow::Result<()> {
+    let context = TestContext::new();
+    context.init_project();
+
+    let config = indoc! {r"
+    repos:
+      - repo: local
+        hooks:
+        - id: test-hook
+          name: Test Hook
+          language: system
+          entry: ./tool
+          pass_filenames: false
+          verbose: true
+    "};
+
+    context.setup_workspace(&["project2"], config)?;
+
+    let root_tool = context.work_dir().child("tool");
+    root_tool.write_str("#!/bin/sh\necho root\n")?;
+    set_executable(&root_tool)?;
+
+    let nested_tool = context.work_dir().child("project2").child("tool");
+    nested_tool.write_str("#!/bin/sh\necho nested\n")?;
+    set_executable(&nested_tool)?;
+
+    context.git_add(".");
+
+    cmd_snapshot!(context.filters(), context.run(), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    ✓ project2
+      Test Hook..............................................................Passed
+      - hook id: test-hook
+      - duration: [TIME]
+
+        nested
+    ✓ <workspace>
+      Test Hook..............................................................Passed
+      - hook id: test-hook
+      - duration: [TIME]
+
+        root
+
+    ----- stderr -----
+    ");
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_missing_relative_direct_entry_does_not_fall_back_to_root() -> anyhow::Result<()> {
+    let context = TestContext::new();
+    context.init_project();
+
+    let config = indoc! {r"
+    repos:
+      - repo: local
+        hooks:
+        - id: test-hook
+          name: Test Hook
+          language: system
+          entry: ./tool
+          pass_filenames: false
+          verbose: true
+    "};
+
+    context.setup_workspace(&["project2"], config)?;
+
+    let root_tool = context.work_dir().child("tool");
+    root_tool.write_str("#!/usr/bin/env echo\nroot\n")?;
+    set_executable(&root_tool)?;
+
+    context.git_add(".");
+
+    cmd_snapshot!(context.filters(), context.run(), @r"
+    success: false
+    exit_code: 2
+    ----- stdout -----
+
+    ----- stderr -----
+    error: Failed to run hook `test-hook`
+      caused by: Run command `run system command` failed
+      caused by: No such file or directory (os error 2)
+    ");
+
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn workspace_windows_relative_direct_entry_resolves_from_hook_work_dir() -> anyhow::Result<()> {
+    let context = TestContext::new();
+    context.init_project();
+
+    let config = indoc! {r"
+    repos:
+      - repo: local
+        hooks:
+        - id: test-hook
+          name: Test Hook
+          language: system
+          entry: .\tool.cmd
+          pass_filenames: false
+          verbose: true
+    "};
+
+    context.setup_workspace(&["project2"], config)?;
+
+    context
+        .work_dir()
+        .child("tool.cmd")
+        .write_str("@echo off\r\necho root\r\n")?;
+    context
+        .work_dir()
+        .child("project2")
+        .child("tool.cmd")
+        .write_str("@echo off\r\necho nested\r\n")?;
+
+    context.git_add(".");
+
+    cmd_snapshot!(context.filters(), context.run(), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    ✓ project2
+      Test Hook..............................................................Passed
+      - hook id: test-hook
+      - duration: [TIME]
+
+        nested
+    ✓ <workspace>
+      Test Hook..............................................................Passed
+      - hook id: test-hook
+      - duration: [TIME]
+
+        root
+
+    ----- stderr -----
+    ");
+
+    Ok(())
+}
+
 #[test]
 fn workspace_commit_msg_hook_receives_message_file_for_each_project() -> anyhow::Result<()> {
     let context = TestContext::new();

@@ -64,12 +64,13 @@ impl HookEntry {
     /// Split the entry and resolve the command by parsing its shebang.
     pub(crate) fn resolve(
         &self,
+        cwd: &Path,
         env_path: Option<&OsStr>,
         store: &Store,
     ) -> Result<PreparedHookEntry, Error> {
         match self {
-            Self::Direct(entry) => entry.resolve(env_path),
-            Self::Shell(entry) => entry.resolve(env_path, store),
+            Self::Direct(entry) => entry.resolve(cwd, env_path),
+            Self::Shell(entry) => entry.resolve(cwd, env_path, store),
         }
     }
 
@@ -79,13 +80,14 @@ impl HookEntry {
     /// the entry is shell source and is not rewritten as a script path.
     pub(crate) fn resolve_script(
         &self,
+        cwd: &Path,
         repo_path: &Path,
         env_path: Option<&OsStr>,
         store: &Store,
     ) -> Result<PreparedHookEntry, Error> {
         match self {
-            Self::Direct(entry) => entry.resolve_script(repo_path, env_path),
-            Self::Shell(entry) => entry.resolve(env_path, store),
+            Self::Direct(entry) => entry.resolve_script(cwd, repo_path, env_path),
+            Self::Shell(entry) => entry.resolve(cwd, env_path, store),
         }
     }
 
@@ -120,15 +122,18 @@ pub(crate) struct DirectHookEntry {
 
 impl DirectHookEntry {
     /// Split the entry and resolve the command by parsing its shebang.
-    fn resolve(&self, env_path: Option<&OsStr>) -> Result<PreparedHookEntry, Error> {
+    fn resolve(&self, cwd: &Path, env_path: Option<&OsStr>) -> Result<PreparedHookEntry, Error> {
         let split = self.split()?;
 
-        Ok(PreparedHookEntry::direct(resolve_command(split, env_path)))
+        Ok(PreparedHookEntry::direct(resolve_command(
+            split, env_path, cwd,
+        )))
     }
 
     /// Resolve a direct `language: script` entry.
     fn resolve_script(
         &self,
+        cwd: &Path,
         repo_path: &Path,
         env_path: Option<&OsStr>,
     ) -> Result<PreparedHookEntry, Error> {
@@ -136,7 +141,9 @@ impl DirectHookEntry {
         let cmd = repo_path.join(&split[0]);
         split[0] = cmd.to_string_lossy().into_owned();
 
-        Ok(PreparedHookEntry::direct(resolve_command(split, env_path)))
+        Ok(PreparedHookEntry::direct(resolve_command(
+            split, env_path, cwd,
+        )))
     }
 
     /// Split the entry into a list of commands.
@@ -168,7 +175,12 @@ pub(crate) struct ShellHookEntry {
 }
 
 impl ShellHookEntry {
-    fn resolve(&self, env_path: Option<&OsStr>, store: &Store) -> Result<PreparedHookEntry, Error> {
+    fn resolve(
+        &self,
+        cwd: &Path,
+        env_path: Option<&OsStr>,
+        store: &Store,
+    ) -> Result<PreparedHookEntry, Error> {
         let temp_dir = tempfile::tempdir_in(store.scratch_path())?;
         let script_path = temp_dir
             .path()
@@ -179,7 +191,7 @@ impl ShellHookEntry {
             error: anyhow::anyhow!(err).context("Failed to write shell entry script"),
         })?;
 
-        let argv = resolve_command(self.shell.argv_for_script(&script_path), env_path);
+        let argv = resolve_command(self.shell.argv_for_script(&script_path), env_path, cwd);
         Ok(PreparedHookEntry::shell(argv, temp_dir))
     }
 }

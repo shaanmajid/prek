@@ -163,7 +163,9 @@ impl LanguageImpl for Node {
         let new_path =
             prepend_paths(&[&bin_dir(env_dir), node_bin]).context("Failed to join PATH")?;
 
-        let entry = hook.entry.resolve(Some(&new_path), store)?;
+        let entry = hook
+            .entry
+            .resolve(hook.work_dir(), Some(&new_path), store)?;
         let npm_cache = store.cache_path(CacheBucket::Npm);
 
         let run = async |batch: &[&Path]| {

@@ -548,7 +548,7 @@ Use `system` for tools with special environment requirements that cannot run in 
 
 ### script
 
-`script` runs repository-local scripts without a managed environment. For remote hooks, `entry` is resolved relative to the hook repository root; for local hooks, it is resolved relative to the current working directory.
+`script` runs repository-local scripts without a managed environment. For remote hooks, `entry` is resolved relative to the hook repository root; for local hooks, it is resolved relative to the hook working directory.
 
 Use `script` for simple repository scripts that only need file paths and no managed environment.
 

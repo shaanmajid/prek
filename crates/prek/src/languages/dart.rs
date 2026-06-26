@@ -167,7 +167,9 @@ impl LanguageImpl for Dart {
         let new_path = prepend_paths(&[&bin_path]).context("Failed to join PATH")?;
         let packages_path = package_config_path(env_dir);
 
-        let mut entry = hook.entry.resolve(Some(&new_path), store)?;
+        let mut entry = hook
+            .entry
+            .resolve(hook.work_dir(), Some(&new_path), store)?;
         // `dart pub get` writes the hook env's dependency graph here. Dart's
         // VM-level `--packages` flag makes `Platform.packageConfig` and package
         // imports resolve against this env instead of the hook work dir.

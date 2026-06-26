@@ -345,7 +345,7 @@ prek run -c docs/.pre-commit-config.yaml
 | Feature | Workspace Mode | Single Config Mode |
 | -- | -- | -- |
 | **Discovery** | Auto-discovers all `.pre-commit-config.yaml` files | Uses single specified config file |
-| **Working Directory** | Uses workspace root | Uses git repository root |
+| **Working Directory** | Each project uses its project root | Uses git repository root |
 | **File Scope** | All files in workspace | All files in git repo |
 | **Hook Scope** | Project-specific file filtering | All files pass to all hooks |
 | **Execution Context** | Each project runs in its own directory | All hooks run from git root |

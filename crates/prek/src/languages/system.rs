@@ -38,7 +38,7 @@ impl LanguageImpl for System {
     ) -> Result<(i32, Vec<u8>)> {
         let progress = reporter.on_run_start(hook, filenames.len());
 
-        let entry = hook.entry.resolve(None, store)?;
+        let entry = hook.entry.resolve(hook.work_dir(), None, store)?;
 
         let run = async |batch: &[&Path]| {
             let mut output = Cmd::new(&entry[0], "run system command")

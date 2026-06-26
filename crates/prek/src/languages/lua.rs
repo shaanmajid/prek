@@ -135,7 +135,9 @@ impl LanguageImpl for Lua {
 
         let env_dir = hook.env_path().expect("Lua must have env path");
         let new_path = prepend_paths(&[&env_dir.join("bin")]).context("Failed to join PATH")?;
-        let entry = hook.entry.resolve(Some(&new_path), store)?;
+        let entry = hook
+            .entry
+            .resolve(hook.work_dir(), Some(&new_path), store)?;
 
         let version = &hook
             .install_info()

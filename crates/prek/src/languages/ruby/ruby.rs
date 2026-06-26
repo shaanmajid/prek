@@ -153,7 +153,9 @@ impl LanguageImpl for Ruby {
         let new_path = prepend_paths(&[&gem_bin, ruby_bin]).context("Failed to join PATH")?;
 
         // Resolve entry point
-        let entry = hook.entry.resolve(Some(&new_path), store)?;
+        let entry = hook
+            .entry
+            .resolve(hook.work_dir(), Some(&new_path), store)?;
 
         // Execute in batches
         let run = async |batch: &[&Path]| {

@@ -101,7 +101,9 @@ impl LanguageImpl for Conda {
 
         let env_dir = hook.env_path().expect("Conda must have env path");
         let new_path = conda_path(env_dir).context("Failed to join PATH")?;
-        let entry = hook.entry.resolve(Some(&new_path), store)?;
+        let entry = hook
+            .entry
+            .resolve(hook.work_dir(), Some(&new_path), store)?;
 
         let run = async |batch: &[&Path]| {
             let mut output = Cmd::new(&entry[0], "run conda hook")

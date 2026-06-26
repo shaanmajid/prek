@@ -1,5 +1,5 @@
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -11,7 +11,6 @@ use tracing::{instrument, trace};
 use crate::cli::reporter::HookInstallReporter;
 use crate::cli::run::HookRunReporter;
 use crate::config::Language;
-use crate::fs::CWD;
 use crate::hook::{Hook, InstallInfo, InstalledHook, Repo};
 use crate::hooks;
 use crate::store::{CacheBucket, Store, ToolBucket};
@@ -439,7 +438,14 @@ pub(crate) async fn extract_metadata(hook: &mut Hook) -> Result<()> {
 }
 
 /// Resolve the actual process invocation, honoring shebangs and PATH lookups.
-pub(crate) fn resolve_command(mut cmds: Vec<String>, paths: Option<&OsStr>) -> Vec<String> {
+///
+/// Relative local files are inspected from `cwd`, matching the directory the hook
+/// will execute in.
+pub(crate) fn resolve_command(
+    mut cmds: Vec<String>,
+    paths: Option<&OsStr>,
+    cwd: &Path,
+) -> Vec<String> {
     let env_path = if paths.is_none() {
         EnvVars::var_os(EnvVars::PATH)
     } else {
@@ -448,13 +454,27 @@ pub(crate) fn resolve_command(mut cmds: Vec<String>, paths: Option<&OsStr>) -> V
     let paths = paths.or(env_path.as_deref());
 
     let candidate = &cmds[0];
-    let resolved_binary = match which::which_in(candidate, paths, &*CWD) {
-        Ok(p) => p,
-        Err(_) => PathBuf::from(candidate),
+    let candidate_path = Path::new(candidate);
+    let (resolved_binary, shebang_path) = match which::which_in(candidate, paths, cwd) {
+        Ok(p) => (p.clone(), Some(p)),
+        Err(_) if candidate_path.is_relative() => {
+            let cwd_candidate = cwd.join(candidate_path);
+            if is_path_like(candidate_path) || cwd_candidate.exists() {
+                (cwd_candidate.clone(), Some(cwd_candidate))
+            } else {
+                (candidate_path.to_path_buf(), None)
+            }
+        }
+        Err(_) => (
+            candidate_path.to_path_buf(),
+            Some(candidate_path.to_path_buf()),
+        ),
     };
     trace!("Resolved command: {}", resolved_binary.display());
 
-    if let Ok(mut shebang_argv) = parse_shebang(&resolved_binary) {
+    if let Some(shebang_path) = shebang_path
+        && let Ok(mut shebang_argv) = parse_shebang(&shebang_path)
+    {
         trace!("Found shebang: {:?}", shebang_argv);
         #[allow(unused_mut)]
         let mut interpreter = shebang_argv[0].as_str();
@@ -475,7 +495,7 @@ pub(crate) fn resolve_command(mut cmds: Vec<String>, paths: Option<&OsStr>) -> V
             }
         }
         // Resolve the interpreter path, convert "python3" to "python3.exe" on Windows
-        if let Ok(p) = which::which_in(interpreter, paths, &*CWD) {
+        if let Ok(p) = which::which_in(interpreter, paths, cwd) {
             shebang_argv[0] = p.to_string_lossy().into_owned();
             trace!("Resolved interpreter: {}", shebang_argv[0]);
         }
@@ -486,6 +506,10 @@ pub(crate) fn resolve_command(mut cmds: Vec<String>, paths: Option<&OsStr>) -> V
         cmds[0] = resolved_binary.to_string_lossy().into_owned();
         cmds
     }
+}
+
+fn is_path_like(path: &Path) -> bool {
+    path.has_root() || path.components().count() > 1
 }
 
 #[cfg(test)]
@@ -516,9 +540,35 @@ mod tests {
 
     #[test]
     fn resolve_command_passthrough_when_not_found() {
+        let dir = tempdir().expect("create temp dir");
         let cmd = "__prek_nonexistent_command__".to_string();
-        let resolved = resolve_command(vec![cmd.clone()], None);
+        let resolved = resolve_command(vec![cmd.clone()], None, dir.path());
         assert_eq!(resolved, vec![cmd]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_resolves_relative_candidate_from_cwd() {
+        let dir = tempdir().expect("create temp dir");
+        let script_path = dir.path().join("hook-script");
+        write_file(&script_path, "");
+        make_executable(&script_path);
+
+        let resolved = resolve_command(vec!["./hook-script".to_string()], None, dir.path());
+
+        assert_eq!(resolved, vec![script_path.to_string_lossy().into_owned()]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_command_resolves_windows_relative_candidate_from_cwd() {
+        let dir = tempdir().expect("create temp dir");
+        let script_path = dir.path().join("hook.cmd");
+        write_file(&script_path, "");
+
+        let resolved = resolve_command(vec![r".\hook.cmd".to_string()], None, dir.path());
+
+        assert_eq!(resolved, vec![script_path.to_string_lossy().into_owned()]);
     }
 
     #[test]
@@ -542,6 +592,35 @@ mod tests {
         let resolved = resolve_command(
             vec![script_path.to_string_lossy().into_owned()],
             Some(paths.as_os_str()),
+            dir.path(),
+        );
+
+        assert_eq!(resolved[0], interpreter_path.to_string_lossy());
+        assert_eq!(resolved[1], script_path.to_string_lossy());
+    }
+
+    #[test]
+    fn resolve_command_resolves_bare_shebang_script_from_cwd() {
+        let dir = tempdir().expect("create temp dir");
+        let script_path = dir.path().join("hook-script");
+        write_file(
+            &script_path,
+            "#!/usr/bin/env prek-test-interpreter\necho hi\n",
+        );
+
+        #[cfg(windows)]
+        let interpreter_path = dir.path().join("prek-test-interpreter.exe");
+        #[cfg(not(windows))]
+        let interpreter_path = dir.path().join("prek-test-interpreter");
+
+        write_file(&interpreter_path, "");
+        make_executable(&interpreter_path);
+
+        let paths = OsString::from(dir.path().as_os_str());
+        let resolved = resolve_command(
+            vec!["hook-script".to_string()],
+            Some(paths.as_os_str()),
+            dir.path(),
         );
 
         assert_eq!(resolved[0], interpreter_path.to_string_lossy());
@@ -562,6 +641,7 @@ mod tests {
         let resolved = resolve_command(
             vec![script_path.to_string_lossy().into_owned()],
             Some(paths.as_os_str()),
+            dir.path(),
         );
 
         assert_eq!(resolved[0], sh_path.to_string_lossy());
@@ -589,6 +669,7 @@ mod tests {
         let resolved = resolve_command(
             vec![script_path.to_string_lossy().into_owned()],
             Some(paths.as_os_str()),
+            dir.path(),
         );
 
         let resolved_interp = Path::new(&resolved[0]);

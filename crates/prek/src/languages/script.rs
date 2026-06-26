@@ -39,12 +39,14 @@ impl LanguageImpl for Script {
     ) -> Result<(i32, Vec<u8>)> {
         // For `language: script`, the `entry[0]` is a script path.
         // For remote hooks, the path is relative to the repo root.
-        // For local hooks, the path is relative to the current working directory.
+        // For local hooks, the path is relative to the hook working directory.
 
         let progress = reporter.on_run_start(hook, filenames.len());
 
         let repo_path = hook.repo_path().unwrap_or(hook.work_dir());
-        let entry = hook.entry.resolve_script(repo_path, None, store)?;
+        let entry = hook
+            .entry
+            .resolve_script(hook.work_dir(), repo_path, None, store)?;
 
         let run = async |batch: &[&Path]| {
             let mut output = Cmd::new(&entry[0], "run script command")

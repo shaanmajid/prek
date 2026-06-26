@@ -131,7 +131,9 @@ impl LanguageImpl for Bun {
         let new_path =
             prepend_paths(&[&bin_dir(env_dir), bun_bin]).context("Failed to join PATH")?;
 
-        let entry = hook.entry.resolve(Some(&new_path), store)?;
+        let entry = hook
+            .entry
+            .resolve(hook.work_dir(), Some(&new_path), store)?;
         let run = async |batch: &[&Path]| {
             let mut output = Cmd::new(&entry[0], "bun hook")
                 .current_dir(hook.work_dir())
