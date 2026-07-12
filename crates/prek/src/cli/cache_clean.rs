@@ -132,22 +132,29 @@ fn remove_symlink(path: &Path, file_type: FileType) -> io::Result<()> {
     }
 }
 
-/// Add write permission to GOMODCACHE directory recursively.
+/// Add owner write permission to GOMODCACHE directory recursively.
 /// Go sets the permissions to read-only by default.
 #[cfg(not(windows))]
 pub fn fix_permissions<P: AsRef<Path>>(path: P) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let path = path.as_ref();
-    let metadata = fs_err::metadata(path)?;
+    let metadata = fs_err::symlink_metadata(path)?;
+
+    // Skip symlink entries so cache cleanup does not ordinarily follow their
+    // targets while preparing the cache for removal.
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
 
     let mut permissions = metadata.permissions();
     let current_mode = permissions.mode();
 
-    // Add write permissions for owner, group, and others
-    let new_mode = current_mode | 0o222;
-    permissions.set_mode(new_mode);
-    fs_err::set_permissions(path, permissions)?;
+    let new_mode = current_mode | 0o200;
+    if new_mode != current_mode {
+        permissions.set_mode(new_mode);
+        fs_err::set_permissions(path, permissions)?;
+    }
 
     // If it's a directory, recursively process its contents
     if metadata.is_dir() {
@@ -172,6 +179,13 @@ pub fn fix_permissions<P: AsRef<Path>>(_path: P) -> io::Result<()> {
 mod tests {
     use super::remove_dir_all;
     use assert_fs::fixture::TempDir;
+
+    #[cfg(unix)]
+    fn mode(path: &std::path::Path) -> anyhow::Result<u32> {
+        use std::os::unix::fs::PermissionsExt;
+
+        Ok(fs_err::symlink_metadata(path)?.permissions().mode() & 0o777)
+    }
 
     #[test]
     fn rm_rf_counts_and_removes_tree() -> anyhow::Result<()> {
@@ -251,6 +265,53 @@ mod tests {
         assert_eq!(stats.total_bytes, expected_len);
         assert!(!cache_root.exists());
 
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix_permissions_adds_owner_write_only() -> anyhow::Result<()> {
+        use super::fix_permissions;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new()?;
+        let go_cache = temp.path().join("go");
+        let readonly_dir = go_cache.join("module");
+        let readonly_file = readonly_dir.join("data.txt");
+        fs_err::create_dir_all(&readonly_dir)?;
+        fs_err::write(&readonly_file, b"contents")?;
+        fs_err::set_permissions(&readonly_file, std::fs::Permissions::from_mode(0o444))?;
+        fs_err::set_permissions(&readonly_dir, std::fs::Permissions::from_mode(0o555))?;
+
+        fix_permissions(&go_cache)?;
+
+        assert_eq!(mode(&readonly_file)?, 0o644);
+        assert_eq!(mode(&readonly_dir)?, 0o755);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix_permissions_skips_symlink_targets() -> anyhow::Result<()> {
+        use super::fix_permissions;
+        use fs_err::os::unix::fs::symlink;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new()?;
+        let go_cache = temp.path().join("go");
+        let outside = temp.path().join("outside");
+        let outside_file = outside.join("data.txt");
+        fs_err::create_dir_all(&go_cache)?;
+        fs_err::create_dir_all(&outside)?;
+        fs_err::write(&outside_file, b"outside")?;
+        fs_err::set_permissions(&outside_file, std::fs::Permissions::from_mode(0o444))?;
+        fs_err::set_permissions(&outside, std::fs::Permissions::from_mode(0o555))?;
+        symlink(&outside, go_cache.join("link-to-outside"))?;
+
+        fix_permissions(&go_cache)?;
+
+        assert_eq!(mode(&outside)?, 0o555);
+        assert_eq!(mode(&outside_file)?, 0o444);
         Ok(())
     }
 }
