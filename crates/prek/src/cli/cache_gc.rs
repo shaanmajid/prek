@@ -13,7 +13,7 @@ use strum::IntoEnumIterator;
 use tracing::{debug, trace, warn};
 
 use crate::cli::ExitStatus;
-use crate::cli::cache_size::{dir_size_bytes, human_readable_bytes};
+use crate::cli::cache_size::{dir_logical_size_bytes, human_readable_bytes};
 use crate::cli::run::InstallCache;
 use crate::config::{self, Error as ConfigError, Repo as ConfigRepo, load_config};
 use crate::hook::{
@@ -510,7 +510,7 @@ fn sweep_tool_bucket_versions(
             continue;
         }
 
-        let entry_bytes = dir_size_bytes(&path);
+        let entry_bytes = dir_logical_size_bytes(&path);
 
         let item = if collect_names {
             Some(RemovalItem::new(
@@ -582,7 +582,7 @@ fn sweep_dir_by_name(
             continue;
         }
 
-        let entry_bytes = dir_size_bytes(&path);
+        let entry_bytes = dir_logical_size_bytes(&path);
 
         let item = if collect_names {
             let repo_marker = (kind == RemovalKind::Repos)

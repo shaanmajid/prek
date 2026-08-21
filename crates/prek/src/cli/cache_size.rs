@@ -3,6 +3,7 @@ use std::path::Path;
 
 use anstream::stream::IsTerminal;
 use anyhow::Result;
+use diskus::DiskUsage;
 
 use crate::cli::{CacheSizeOutputFormat, ExitStatus};
 use crate::printer::Printer;
@@ -14,7 +15,7 @@ pub(crate) fn cache_size(
     output_format: CacheSizeOutputFormat,
     printer: Printer,
 ) -> Result<ExitStatus> {
-    let total_bytes = dir_size_bytes(store.path());
+    let total_bytes = disk_usage_bytes(store.path());
 
     let human_readable = match output_format {
         CacheSizeOutputFormat::Auto => std::io::stdout().is_terminal(),
@@ -49,7 +50,7 @@ pub(crate) fn human_readable_bytes(bytes: u64) -> (f32, &'static str) {
     (bytes_f32 / 1024_f32.powi(i as i32), UNITS[i])
 }
 
-pub(crate) fn dir_size_bytes(path: &Path) -> u64 {
+pub(crate) fn dir_logical_size_bytes(path: &Path) -> u64 {
     if !path.exists() {
         return 0;
     }
@@ -65,9 +66,17 @@ pub(crate) fn dir_size_bytes(path: &Path) -> u64 {
         .sum()
 }
 
+fn disk_usage_bytes(path: &Path) -> u64 {
+    if !path.exists() {
+        return 0;
+    }
+
+    DiskUsage::new([path]).count_ignoring_errors()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{dir_size_bytes, human_readable_bytes};
+    use super::{dir_logical_size_bytes, disk_usage_bytes, human_readable_bytes};
     use assert_fs::fixture::TempDir;
 
     #[test]
@@ -82,7 +91,7 @@ mod tests {
         let temp = TempDir::new()?;
         let missing = temp.path().join("missing");
 
-        assert_eq!(dir_size_bytes(&missing), 0);
+        assert_eq!(dir_logical_size_bytes(&missing), 0);
 
         Ok(())
     }
@@ -91,7 +100,7 @@ mod tests {
     fn dir_stats_empty_directory() -> anyhow::Result<()> {
         let temp = TempDir::new()?;
 
-        assert_eq!(dir_size_bytes(temp.path()), 0);
+        assert_eq!(dir_logical_size_bytes(temp.path()), 0);
 
         Ok(())
     }
@@ -105,7 +114,42 @@ mod tests {
         fs_err::write(temp.path().join("nested/data.txt"), b"abc")?;
         fs_err::write(temp.path().join("nested/deep/end.bin"), b"zz")?;
 
-        assert_eq!(dir_size_bytes(temp.path()), 10);
+        assert_eq!(dir_logical_size_bytes(temp.path()), 10);
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dir_stats_report_allocated_bytes() -> anyhow::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = TempDir::new()?;
+        let file = temp.path().join("small.txt");
+        fs_err::write(&file, b"x")?;
+
+        let expected =
+            fs_err::metadata(temp.path())?.blocks() * 512 + fs_err::metadata(file)?.blocks() * 512;
+
+        assert_eq!(disk_usage_bytes(temp.path()), expected);
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dir_stats_count_hardlinks_once() -> anyhow::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = TempDir::new()?;
+        let file = temp.path().join("file.txt");
+        fs_err::write(&file, b"content")?;
+        fs_err::hard_link(&file, temp.path().join("hardlink.txt"))?;
+
+        let expected =
+            fs_err::metadata(temp.path())?.blocks() * 512 + fs_err::metadata(file)?.blocks() * 512;
+
+        assert_eq!(disk_usage_bytes(temp.path()), expected);
 
         Ok(())
     }

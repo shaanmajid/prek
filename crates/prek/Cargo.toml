@@ -42,6 +42,7 @@ clap = { workspace = true }
 clap_complete = { workspace = true }
 console = { workspace = true }
 ctrlc = { workspace = true }
+diskus = { workspace = true }
 dunce = { workspace = true }
 etcetera = { workspace = true }
 fancy-regex = { workspace = true }

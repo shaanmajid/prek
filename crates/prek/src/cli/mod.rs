@@ -1080,7 +1080,7 @@ pub(crate) enum CacheCommand {
     GC(CacheGcArgs),
     /// Remove all prek cached data.
     Clean,
-    /// Show the size of the prek cache.
+    /// Show the disk space used by the prek cache.
     Size(SizeArgs),
 }
 
