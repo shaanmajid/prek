@@ -710,6 +710,8 @@ jobs:
     if: ${{ needs.plan.outputs.run-bench == 'true' }}
     uses: ./.github/workflows/performance.yml
     with:
+      base-ref: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/master' }}
+      head-ref: ${{ github.sha }}
       save-rust-cache: ${{ needs.plan.outputs.save-rust-cache }}
 
   ecosystem-cpython:

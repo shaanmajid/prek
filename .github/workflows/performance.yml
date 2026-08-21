@@ -3,6 +3,12 @@ name: Performance
 on:
   workflow_call:
     inputs:
+      base-ref:
+        required: true
+        type: string
+      head-ref:
+        required: true
+        type: string
       save-rust-cache:
         required: false
         type: string
@@ -47,7 +53,9 @@ jobs:
 
       - name: Checkout base
         run: |
-          git checkout ${{ github.event.pull_request.base.sha }}
+          git checkout "$BASE_REF"
+        env:
+          BASE_REF: ${{ inputs.base-ref }}
 
       - name: Build base branch
         id: bloat_base
@@ -136,16 +144,17 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.HYPERFINE_BIN_DIR }}/${{ env.HYPERFINE_BASE_BINARY }}
-          key: prek-hyperfine-base-${{ github.event.pull_request.base.sha }}-${{ hashFiles('Cargo.lock') }}-${{ runner.os }}-${{ runner.arch }}
+          key: prek-hyperfine-base-${{ inputs.base-ref }}-${{ hashFiles('Cargo.lock') }}-${{ runner.os }}-${{ runner.arch }}
 
       - name: Build base version
         if: ${{ steps.base-binary-cache.outputs.cache-hit != 'true' }}
         env:
-          BASE_VERSION: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ inputs.base-ref }}
+          HEAD_REF: ${{ inputs.head-ref }}
         run: |
-          git checkout ${{ github.event.pull_request.base.sha }}
+          git checkout "$BASE_REF"
           cargo build --profile profiling && mv target/profiling/prek "$HYPERFINE_BIN_DIR/$HYPERFINE_BASE_BINARY"
-          git checkout ${{ github.sha }}
+          git checkout "$HEAD_REF"
 
       - name: Build head version
         run: |
