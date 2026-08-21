@@ -662,7 +662,7 @@ prek cache [OPTIONS] <COMMAND>
 <dl class="cli-reference"><dt><a href="#prek-cache-dir"><code>prek cache dir</code></a></dt><dd><p>Show the location of the prek cache</p></dd>
 <dt><a href="#prek-cache-gc"><code>prek cache gc</code></a></dt><dd><p>Remove unused cached repositories, hook environments, and other data</p></dd>
 <dt><a href="#prek-cache-clean"><code>prek cache clean</code></a></dt><dd><p>Remove all prek cached data</p></dd>
-<dt><a href="#prek-cache-size"><code>prek cache size</code></a></dt><dd><p>Show the size of the prek cache</p></dd>
+<dt><a href="#prek-cache-size"><code>prek cache size</code></a></dt><dd><p>Show the disk space used by the prek cache</p></dd>
 </dl>
 
 ### prek cache dir
@@ -761,7 +761,7 @@ prek cache clean [OPTIONS]
 
 ### prek cache size
 
-Show the size of the prek cache
+Show the disk space used by the prek cache
 
 <h3 class="cli-reference">Usage</h3>
 
