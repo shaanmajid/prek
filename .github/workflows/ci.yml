@@ -751,10 +751,13 @@ jobs:
     name: "all required jobs passed"
     if: always()
     needs:
+      - plan
       - lint
       - check-release
       - check-zizmor
       - check-docs
+      - build-release-binaries
+      - build-docker
       - cargo-clippy-linux
       - cargo-clippy-windows
       - cargo-shear
@@ -762,6 +765,7 @@ jobs:
       - cargo-test
       - cargo-test-windows
       - language-tests
+      - performance
       - ecosystem-cpython
       - build-dev-binaries
     runs-on: ubuntu-slim
