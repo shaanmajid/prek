@@ -84,6 +84,9 @@ jobs:
             [[ "$file" == "Cargo.toml" || "$file" == "Cargo.lock" || "$file" =~ ^crates/.*/Cargo\.toml$ ]] && rust_deps_changed=1
             [[ "$file" == "rust-toolchain.toml" || "$file" =~ ^\.cargo/ ]] && rust_config_changed=1
             [[ "$file" == "pyproject.toml" ]] && pyproject_changed=1
+            [[ "$file" =~ ^python/ ]] && python_packaging_changed=1
+            [[ "$file" =~ ^npm/ ]] && npm_packaging_changed=1
+            [[ "$file" == "scripts/build-npm-packages.py" ]] && npm_packaging_changed=1
             [[ "$file" == "docs/reference/cli.md" || "$file" == "docs/reference/configuration.md" || "$file" == "prek.schema.json" ]] && generated_from_code_changed=1
             [[ "$file" =~ ^docs/ || "$file" == "mkdocs.yml" || "$file" == "pyproject.toml" || "$file" == "uv.lock" ]] && docs_related_changed=1
             [[ "$file" =~ ^\.github/workflows/.*\.ya?ml$ ]] && workflow_changed=1
@@ -102,7 +105,7 @@ jobs:
           [[ $rust_code_changed || $rust_deps_changed || $rust_config_changed ]] && any_rust_changed=1
           [[ $rust_deps_changed || $rust_config_changed || $workflow_changed ]] && cache_relevant_changed=1
           [[ $bench_workflow_changed || $bench_scripts_changed ]] && bench_related_changed=1
-          [[ $pyproject_changed || $release_binaries_workflow_changed ]] && release_build_changed=1
+          [[ $pyproject_changed || $release_binaries_workflow_changed || $release_config_changed || $python_packaging_changed || $npm_packaging_changed ]] && release_build_changed=1
           [[ $rust_deps_changed || $rust_config_changed || $dockerfile_changed || $docker_workflow_changed ]] && docker_build_changed=1
 
           [[ ! $has_skip_label && ($any_code_changed || $generated_from_code_changed || $on_master_branch) ]] && test_code=1
