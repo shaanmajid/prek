@@ -200,8 +200,8 @@ jobs:
 
       - name: Build documentation
         run: |
-          uv run --group docs zensical build
-          uv run --group docs llmstxt-standalone build
+          uv run --locked --group docs zensical build
+          uv run --locked --group docs llmstxt-standalone build
 
   build-release-binaries:
     needs: plan
