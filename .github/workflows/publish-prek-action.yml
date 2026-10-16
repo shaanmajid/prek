@@ -118,7 +118,20 @@ jobs:
             echo "No CI run appeared for $PR_HEAD_SHA" >&2
             exit 1
           fi
-          gh run watch "$run_id" --repo j178/prek-action --exit-status --interval 10
+          conclusion=""
+          for ((attempt = 0; attempt < 120; attempt++)); do
+            result=$(gh run view "$run_id" --repo j178/prek-action \
+              --json status,conclusion)
+            if [[ $(jq -r '.status' <<< "$result") == completed ]]; then
+              conclusion=$(jq -r '.conclusion' <<< "$result")
+              break
+            fi
+            sleep 10
+          done
+          if [[ "$conclusion" != success ]]; then
+            echo "CI run $run_id did not succeed: ${conclusion:-timed out}" >&2
+            exit 1
+          fi
           gh pr checks "$PR_NUMBER" --repo j178/prek-action --watch --fail-fast
           gh pr merge --squash --repo j178/prek-action \
             --match-head-commit "$PR_HEAD_SHA" "$PR_NUMBER"
