@@ -2,6 +2,7 @@
 # It is now customized for PyPI attestations, cache policy, and self-repository references.
 # When regenerating, preserve ACTIONS_CACHE_MODE, the $/ references, custom-publish-pypi, and its
 # dependency and success check in announce.
+# Also preserve custom-publish-prek-action's expected-tag input.
 #
 # Copyright 2022-2024, axodotdev
 # SPDX-License-Identifier: MIT or Apache-2.0
@@ -349,6 +350,7 @@ jobs:
     uses: $/.github/workflows/publish-prek-action.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
+      expected-tag: ${{ needs.plan.outputs.tag }}
     secrets: inherit
 
   custom-publish-winget:

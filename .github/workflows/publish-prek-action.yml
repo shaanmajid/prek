@@ -7,11 +7,20 @@ on:
       plan:
         required: false
         type: string
+      expected-tag:
+        description: Release tag that must be included in the update
+        required: false
+        type: string
     secrets:
       PREK_ACTION_TOKEN:
         required: true
 
 permissions: {}
+
+# All releases update the same branch in prek-action.
+concurrency:
+  group: publish-prek-action
+  cancel-in-progress: false
 
 env:
   ACTIONS_CACHE_MODE: none
@@ -43,9 +52,8 @@ jobs:
         id: refresh
         env:
           GITHUB_TOKEN: ${{ secrets.PREK_ACTION_TOKEN }}
+          EXPECTED_RELEASE_TAG: ${{ inputs.expected-tag }}
         run: |
-          # Wait a bit to ensure the new release is available via the GitHub API.
-          sleep 10
           npm run update-known-versions
 
       - name: Check whether known version files changed
@@ -85,12 +93,32 @@ jobs:
             Added releases:
             ${{ steps.refresh.outputs.added_versions_markdown }}
 
-      - name: Merge pull request
+      - name: Wait for checks and merge pull request
         if: steps.cpr.outputs.pull-request-number != ''
+        timeout-minutes: 30
         env:
           GH_TOKEN: ${{ secrets.PREK_ACTION_TOKEN }}
           PR_NUMBER: ${{ steps.cpr.outputs.pull-request-number }}
+          PR_HEAD_SHA: ${{ steps.cpr.outputs.pull-request-head-sha }}
         shell: bash
         run: |
-          sleep 10
-          gh pr merge --squash --repo j178/prek-action "$PR_NUMBER"
+          # Checks can appear gradually. Wait for the complete CI workflow,
+          # including its platform matrix, before considering the PR checks.
+          run_id=""
+          for ((attempt = 0; attempt < 60; attempt++)); do
+            run_id=$(gh run list --repo j178/prek-action --workflow ci.yml \
+              --event pull_request --commit "$PR_HEAD_SHA" --limit 1 \
+              --json databaseId --jq '.[0].databaseId // empty')
+            if [[ -n "$run_id" ]]; then
+              break
+            fi
+            sleep 10
+          done
+          if [[ -z "$run_id" ]]; then
+            echo "No CI run appeared for $PR_HEAD_SHA" >&2
+            exit 1
+          fi
+          gh run watch "$run_id" --repo j178/prek-action --exit-status --interval 10
+          gh pr checks "$PR_NUMBER" --repo j178/prek-action --watch --fail-fast
+          gh pr merge --squash --repo j178/prek-action \
+            --match-head-commit "$PR_HEAD_SHA" "$PR_NUMBER"
